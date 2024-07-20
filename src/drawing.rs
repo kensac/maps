@@ -1,9 +1,9 @@
-use image::{DynamicImage, ImageFormat, Pixel, Rgb, RgbImage, Rgba, RgbaImage};
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use image::{Pixel, Rgba, RgbaImage};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::BufWriter;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 fn calculate_bounding_box(ways: &[&[(Vec<(f64, f64)>, u32)]]) -> (f64, f64, f64, f64) {
@@ -122,8 +122,8 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 5;
-    let tiles_y = 5;
+    let tiles_x = 20;
+    let tiles_y = 20;
     let img_size: u32 = 4096 * 2;
     let subgroups = 2;
 
@@ -151,7 +151,7 @@ pub fn draw_map(
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgba([255,255,255,255]),
+            Rgba([255, 255, 255, 255]),
         );
         draw_ways(
             &mut img,
@@ -307,35 +307,45 @@ fn stitch_images(
     let total_width = img_size * tiles_x as u32;
     let total_height = img_size * tiles_y as u32;
 
+    // Create a new image with a black background
     let mut stitched_image = RgbaImage::new(total_width, total_height);
-    // make background black
-    for x in 0..total_width {
-        for y in 0..total_height {
-            stitched_image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
-        }
-    }
-    
-    for x in 0..tiles_x {
-        for y in 0..tiles_y {
-            let start_time = Instant::now();
-            let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
-            let tile_image = image::open(&file_name).unwrap().to_rgba8();
-            let (width, height) = tile_image.dimensions();
 
+    // Wrap stitched_image in an Arc to allow sharing among threads
+    let stitched_image = Arc::new(stitched_image);
+
+    // Prepare a vector of tile coordinates to process in parallel
+    let tile_coordinates: Vec<(usize, usize)> = (0..tiles_x)
+        .flat_map(|x| (0..tiles_y).map(move |y| (x, y)))
+        .collect();
+
+    // Process each tile in parallel
+    tile_coordinates.par_iter().for_each(|&(x, y)| {
+        let start_time = Instant::now();
+        let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
+        let tile_image = image::open(&file_name).unwrap().to_rgba8();
+        let (width, height) = tile_image.dimensions();
+
+        // Calculate the starting position on the stitched image
+        let offset_x = x as u32 * img_size;
+        let offset_y = (tiles_y as u32 - y as u32 - 1) * img_size;
+
+        // Use unsafe code to get a mutable reference to the stitched_image
+        let stitched_image_ptr = Arc::as_ptr(&stitched_image) as *mut RgbaImage;
+        unsafe {
+            let stitched_image = &mut *stitched_image_ptr;
             for tx in 0..width {
                 for ty in 0..height {
-                    stitched_image.put_pixel(
-                        x as u32 * img_size + tx,
-                        (tiles_y as u32 - y as u32 - 1) * img_size + ty,
-                        *tile_image.get_pixel(tx, ty),
-                    );
+                    let pixel = tile_image.get_pixel(tx, ty);
+                    stitched_image.put_pixel(offset_x + tx, offset_y + ty, *pixel);
                 }
             }
-            println!("Tile {}_{} stitched in {:?}", x, y, start_time.elapsed());
         }
-    }
+        println!("Tile {}_{} stitched in {:?}", x, y, start_time.elapsed());
+    });
 
-    let fout = &mut BufWriter::new(File::create(Path::new(output_file)).unwrap());
+    let buffer_size = 64 * 1024 * 1024; // 16 MB buffer
+    let fout =
+        &mut BufWriter::with_capacity(buffer_size, File::create(Path::new(output_file)).unwrap());
     stitched_image
         .write_to(fout, image::ImageFormat::Png)
         .unwrap();
