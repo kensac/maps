@@ -1,7 +1,9 @@
-use image::{Pixel, Rgb, RgbImage};
+use image::{DynamicImage, ImageFormat, Pixel, Rgb, RgbImage};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn calculate_bounding_box(ways: &[&[(Vec<(f64, f64)>, u32)]]) -> (f64, f64, f64, f64) {
@@ -123,72 +125,74 @@ pub fn draw_map(
     let tiles_x = 20;
     let tiles_y = 20;
     let img_size: u32 = 4096 * 2;
+    let subgroups = 2;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
     let lat_step = (max_lat - min_lat) / tiles_y as f64;
 
-    for x in 0..tiles_x {
-        for y in 0..tiles_y {
-            let time_start = Instant::now();
-            let tile_min_lon = min_lon + x as f64 * lon_step;
-            let tile_max_lon = tile_min_lon + lon_step;
-            let tile_min_lat = min_lat + y as f64 * lat_step;
-            let tile_max_lat = tile_min_lat + lat_step;
+    let tiles: Vec<(usize, usize)> = (0..tiles_x)
+        .flat_map(|x| (0..tiles_y).map(move |y| (x, y)))
+        .collect();
 
-            let mut img = RgbImage::new(img_size, img_size);
+    tiles.par_iter().for_each(|&(x, y)| {
+        let time_start = Instant::now();
+        let tile_min_lon = min_lon + x as f64 * lon_step;
+        let tile_max_lon = tile_min_lon + lon_step;
+        let tile_min_lat = min_lat + y as f64 * lat_step;
+        let tile_max_lat = tile_min_lat + lat_step;
 
-            draw_ways(
-                &mut img,
-                highways,
-                tile_min_lon,
-                tile_min_lat,
-                tile_max_lon,
-                tile_max_lat,
-                img_size,
-                Rgb([255, 255, 255]),
-            );
-            draw_ways(
-                &mut img,
-                waterways,
-                tile_min_lon,
-                tile_min_lat,
-                tile_max_lon,
-                tile_max_lat,
-                img_size,
-                Rgb([0, 0, 255]),
-            );
-            draw_ways(
-                &mut img,
-                railways,
-                tile_min_lon,
-                tile_min_lat,
-                tile_max_lon,
-                tile_max_lat,
-                img_size,
-                Rgb([255, 0, 0]),
-            );
+        let mut img = RgbImage::new(img_size, img_size);
 
-            draw_path(
-                &mut img,
-                path,
-                tile_min_lon,
-                tile_min_lat,
-                tile_max_lon,
-                tile_max_lat,
-                img_size,
-                Rgb([0, 255, 0]),
-                4, // Added parameter for line thickness
-            );
+        draw_ways(
+            &mut img,
+            highways,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgb([255, 255, 255]),
+        );
+        draw_ways(
+            &mut img,
+            waterways,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgb([0, 0, 255]),
+        );
+        draw_ways(
+            &mut img,
+            railways,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgb([255, 0, 0]),
+        );
 
-            let file_name = format!("osm_map_{}_{}.png", x, y);
-            img.save(&file_name).unwrap();
-            println!("Tile {}_{} rendered in {:?}", x, y, time_start.elapsed());
-        }
-    }
+        draw_path(
+            &mut img,
+            path,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgb([0, 255, 0]),
+            4, // Added parameter for line thickness
+        );
+
+        let file_name = format!("osm_map_{}_{}.png", x, y);
+        img.save(&file_name).unwrap();
+        println!("Tile {}_{} rendered in {:?}", x, y, time_start.elapsed());
+    });
 
     stitch_images(tiles_x, tiles_y, img_size, "osm_map", "stitched_map.png");
 }
-
 fn draw_ways(
     img: &mut RgbImage,
     ways: &[(Vec<(f64, f64)>, u32)],
@@ -227,44 +231,6 @@ fn interpolate(c1: Rgb<u8>, c2: Rgb<u8>, t: f32) -> Rgb<u8> {
         let b = b as f32;
         (a * (1.0 - t) + b * t) as u8
     })
-}
-
-fn stitch_images(
-    tiles_x: usize,
-    tiles_y: usize,
-    img_size: u32,
-    tile_prefix: &str,
-    output_file: &str,
-) {
-    let total_width = img_size * tiles_x as u32;
-    let total_height = img_size * tiles_y as u32;
-
-    let mut stitched_image = RgbImage::new(total_width, total_height);
-
-    for x in 0..tiles_x {
-        for y in 0..tiles_y {
-            let start_time = Instant::now();
-            let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
-            let tile_image = image::open(&file_name).unwrap().to_rgb8();
-            let (width, height) = tile_image.dimensions();
-
-            for tx in 0..width {
-                for ty in 0..height {
-                    stitched_image.put_pixel(
-                        x as u32 * img_size + tx,
-                        (tiles_y as u32 - y as u32 - 1) * img_size + ty,
-                        *tile_image.get_pixel(tx, ty),
-                    );
-                }
-            }
-            println!("Tile {}_{} stitched in {:?}", x, y, start_time.elapsed());
-        }
-    }
-
-    let fout = &mut BufWriter::new(File::create(Path::new(output_file)).unwrap());
-    stitched_image
-        .write_to(fout, image::ImageFormat::Png)
-        .unwrap();
 }
 
 fn draw_path(
@@ -329,4 +295,42 @@ fn perpendicular_offset(x0: i32, y0: i32, x1: i32, y1: i32, offset: i32) -> (i32
     let offset_x = (-dy as f64 * offset as f64 / length).round() as i32;
     let offset_y = (dx as f64 * offset as f64 / length).round() as i32;
     (offset_x, offset_y)
+}
+
+fn stitch_images(
+    tiles_x: usize,
+    tiles_y: usize,
+    img_size: u32,
+    tile_prefix: &str,
+    output_file: &str,
+) {
+    let total_width = img_size * tiles_x as u32;
+    let total_height = img_size * tiles_y as u32;
+
+    let mut stitched_image = RgbImage::new(total_width, total_height);
+
+    for x in 0..tiles_x {
+        for y in 0..tiles_y {
+            let start_time = Instant::now();
+            let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
+            let tile_image = image::open(&file_name).unwrap().to_rgb8();
+            let (width, height) = tile_image.dimensions();
+
+            for tx in 0..width {
+                for ty in 0..height {
+                    stitched_image.put_pixel(
+                        x as u32 * img_size + tx,
+                        (tiles_y as u32 - y as u32 - 1) * img_size + ty,
+                        *tile_image.get_pixel(tx, ty),
+                    );
+                }
+            }
+            println!("Tile {}_{} stitched in {:?}", x, y, start_time.elapsed());
+        }
+    }
+
+    let fout = &mut BufWriter::new(File::create(Path::new(output_file)).unwrap());
+    stitched_image
+        .write_to(fout, image::ImageFormat::Png)
+        .unwrap();
 }
