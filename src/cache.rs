@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub trait SerializableData: Serialize + for<'de> Deserialize<'de> {}
 
@@ -14,7 +12,10 @@ pub fn load_cache<T: SerializableData>(filename: &str) -> Result<T, Box<dyn std:
     Ok(cached_data)
 }
 
-pub fn save_cache<T: SerializableData>(filename: &str, data: &T) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_cache<T: SerializableData>(
+    filename: &str,
+    data: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
     let serialized_data = bincode::serialize(data)?;
     fs::write(filename, serialized_data)?;
     Ok(())

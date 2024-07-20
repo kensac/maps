@@ -1,4 +1,7 @@
-use std::{collections::HashMap, hash::{Hash, Hasher}};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+};
 
 use serde::{Deserialize, Serialize};
 

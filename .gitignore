@@ -2,3 +2,4 @@
 *.osm.pbf
 *.png
 *.cache
+.DS_Store

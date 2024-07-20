@@ -2,7 +2,6 @@ use std::{collections::HashMap, ffi::OsStr};
 
 use osmpbfreader::{OsmObj, OsmPbfReader, Way};
 
-
 pub fn read_osm_data(
     filename: &OsStr,
 ) -> (
@@ -11,7 +10,7 @@ pub fn read_osm_data(
     Vec<(Vec<(f64, f64)>, u32)>,
     Vec<(Vec<(f64, f64)>, u32)>,
 ) {
-    let r = std::fs::File::open(&std::path::Path::new(filename)).unwrap();
+    let r = std::fs::File::open(std::path::Path::new(filename)).unwrap();
     let mut pbf = OsmPbfReader::new(r);
 
     let mut nodes: HashMap<i64, (f64, f64)> = HashMap::new();
@@ -45,7 +44,7 @@ pub fn extract_way_nodes(way: &Way, nodes: &HashMap<i64, (f64, f64)>) -> (Vec<(f
         .nodes
         .iter()
         .filter_map(|node_id| nodes.get(&node_id.0))
-        .map(|&(lon, lat)| (lon, lat )) // Convert from microdegrees to degrees
+        .map(|&(lon, lat)| (lon, lat)) // Convert from microdegrees to degrees
         .collect();
 
     let lanes = way
