@@ -45,7 +45,7 @@ pub fn extract_way_nodes(way: &Way, nodes: &HashMap<i64, (f64, f64)>) -> (Vec<(f
         .nodes
         .iter()
         .filter_map(|node_id| nodes.get(&node_id.0))
-        .map(|&(lon, lat)| (lon / 1e7, lat / 1e7)) // Convert from microdegrees to degrees
+        .map(|&(lon, lat)| (lon, lat )) // Convert from microdegrees to degrees
         .collect();
 
     let lanes = way
