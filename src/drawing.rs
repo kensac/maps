@@ -1,4 +1,4 @@
-use image::{DynamicImage, ImageFormat, Pixel, Rgb, RgbImage};
+use image::{DynamicImage, ImageFormat, Pixel, Rgb, RgbImage, Rgba, RgbaImage};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -40,14 +40,14 @@ fn lon_lat_to_pixel(
     (x, y)
 }
 
-fn plot(img: &mut RgbImage, x: i32, y: i32, color: Rgb<u8>, alpha: f32) {
+fn plot(img: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>, alpha: f32) {
     if x >= 0 && y >= 0 && x < img.width() as i32 && y < img.height() as i32 {
         let pixel = img.get_pixel_mut(x as u32, y as u32);
         *pixel = interpolate(*pixel, color, alpha);
     }
 }
 
-fn draw_line_wu(img: &mut RgbImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgb<u8>) {
+fn draw_line_wu(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
     let (dx, dy) = ((x1 - x0).abs(), (y1 - y0).abs());
     let (mut x0, mut y0, mut x1, mut y1) = if dy > dx {
         (y0, x0, y1, x1)
@@ -122,8 +122,8 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 20;
-    let tiles_y = 20;
+    let tiles_x = 5;
+    let tiles_y = 5;
     let img_size: u32 = 4096 * 2;
     let subgroups = 2;
 
@@ -141,7 +141,7 @@ pub fn draw_map(
         let tile_min_lat = min_lat + y as f64 * lat_step;
         let tile_max_lat = tile_min_lat + lat_step;
 
-        let mut img = RgbImage::new(img_size, img_size);
+        let mut img: image::ImageBuffer<Rgba<u8>, Vec<u8>> = RgbaImage::new(img_size, img_size);
 
         draw_ways(
             &mut img,
@@ -151,7 +151,7 @@ pub fn draw_map(
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgb([255, 255, 255]),
+            Rgba([255,255,255,255]),
         );
         draw_ways(
             &mut img,
@@ -161,7 +161,7 @@ pub fn draw_map(
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgb([0, 0, 255]),
+            Rgba([0, 0, 255, 255]),
         );
         draw_ways(
             &mut img,
@@ -171,7 +171,7 @@ pub fn draw_map(
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgb([255, 0, 0]),
+            Rgba([255, 0, 0, 255]),
         );
 
         draw_path(
@@ -182,7 +182,7 @@ pub fn draw_map(
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgb([0, 255, 0]),
+            Rgba([0, 255, 0, 255]),
             4, // Added parameter for line thickness
         );
 
@@ -194,14 +194,14 @@ pub fn draw_map(
     stitch_images(tiles_x, tiles_y, img_size, "osm_map", "stitched_map.png");
 }
 fn draw_ways(
-    img: &mut RgbImage,
+    img: &mut RgbaImage,
     ways: &[(Vec<(f64, f64)>, u32)],
     min_lon: f64,
     min_lat: f64,
     max_lon: f64,
     max_lat: f64,
     img_size: u32,
-    color: Rgb<u8>,
+    color: Rgba<u8>,
 ) {
     for (way, _width) in ways {
         for w in way.windows(2) {
@@ -225,7 +225,7 @@ fn draw_ways(
     }
 }
 
-fn interpolate(c1: Rgb<u8>, c2: Rgb<u8>, t: f32) -> Rgb<u8> {
+fn interpolate(c1: Rgba<u8>, c2: Rgba<u8>, t: f32) -> Rgba<u8> {
     c1.map2(&c2, |a, b| {
         let a = a as f32;
         let b = b as f32;
@@ -234,14 +234,14 @@ fn interpolate(c1: Rgb<u8>, c2: Rgb<u8>, t: f32) -> Rgb<u8> {
 }
 
 fn draw_path(
-    img: &mut RgbImage,
+    img: &mut RgbaImage,
     path: &[(f64, f64)],
     min_lon: f64,
     min_lat: f64,
     max_lon: f64,
     max_lat: f64,
     img_size: u32,
-    color: Rgb<u8>,
+    color: Rgba<u8>,
     thickness: i32, // Added parameter for line thickness
 ) {
     for points in path.windows(2) {
@@ -307,13 +307,19 @@ fn stitch_images(
     let total_width = img_size * tiles_x as u32;
     let total_height = img_size * tiles_y as u32;
 
-    let mut stitched_image = RgbImage::new(total_width, total_height);
-
+    let mut stitched_image = RgbaImage::new(total_width, total_height);
+    // make background black
+    for x in 0..total_width {
+        for y in 0..total_height {
+            stitched_image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+        }
+    }
+    
     for x in 0..tiles_x {
         for y in 0..tiles_y {
             let start_time = Instant::now();
             let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
-            let tile_image = image::open(&file_name).unwrap().to_rgb8();
+            let tile_image = image::open(&file_name).unwrap().to_rgba8();
             let (width, height) = tile_image.dimensions();
 
             for tx in 0..width {
