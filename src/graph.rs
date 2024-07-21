@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::types::{Coord, Edge};
 use pathfinding::prelude::astar;
 
-pub fn build_graph(highways: &[(Vec<(f64, f64)>, u32)]) -> HashMap<Coord, Vec<Edge>> {
+pub fn build_graph(highways: &[Vec<(f64, f64)>]) -> HashMap<Coord, Vec<Edge>> {
     let mut graph = HashMap::new();
-    for (way, _width) in highways {
+    for way in highways {
         for window in way.windows(2) {
             let (lon1, lat1) = window[0];
             let (lon2, lat2) = window[1];

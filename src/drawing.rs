@@ -6,9 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-fn calculate_bounding_box(ways: &[&[(Vec<(f64, f64)>, u32)]]) -> (f64, f64, f64, f64) {
+fn calculate_bounding_box(ways: &[&[Vec<(f64, f64)>]]) -> (f64, f64, f64, f64) {
     ways.iter()
-        .flat_map(|way_group| way_group.iter().flat_map(|(way, _)| way))
+        .flat_map(|way_group| way_group.iter().flatten())
         .fold(
             (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
             |(min_lon, min_lat, max_lon, max_lat), &(lon, lat)| {
@@ -45,6 +45,14 @@ fn plot(img: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>, alpha: f32) {
         let pixel = img.get_pixel_mut(x as u32, y as u32);
         *pixel = interpolate(*pixel, color, alpha);
     }
+}
+
+fn interpolate(c1: Rgba<u8>, c2: Rgba<u8>, t: f32) -> Rgba<u8> {
+    c1.map2(&c2, |a, b| {
+        let a = a as f32;
+        let b = b as f32;
+        (a * (1.0 - t) + b * t) as u8
+    })
 }
 
 fn draw_line_wu(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgba<u8>) {
@@ -104,9 +112,9 @@ fn draw_line_wu(img: &mut RgbaImage, x0: i32, y0: i32, x1: i32, y1: i32, color: 
 }
 
 pub fn draw_map(
-    highways: &[(Vec<(f64, f64)>, u32)],
-    waterways: &[(Vec<(f64, f64)>, u32)],
-    railways: &[(Vec<(f64, f64)>, u32)],
+    highways: &[Vec<(f64, f64)>],
+    waterways: &[Vec<(f64, f64)>],
+    railways: &[Vec<(f64, f64)>],
     buildings: &[Vec<(f64, f64)>],
     path: &[(f64, f64)],
 ) {
@@ -123,9 +131,9 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 20;
-    let tiles_y = 20;
-    let img_size: u32 = 4096 * 2;
+    let tiles_x = 2;
+    let tiles_y = 2;
+    let img_size: u32 = 4096;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
     let lat_step = (max_lat - min_lat) / tiles_y as f64;
@@ -207,7 +215,7 @@ pub fn draw_map(
 
 fn draw_ways(
     img: &mut RgbaImage,
-    ways: &[(Vec<(f64, f64)>, u32)],
+    ways: &[Vec<(f64, f64)>],
     min_lon: f64,
     min_lat: f64,
     max_lon: f64,
@@ -215,7 +223,7 @@ fn draw_ways(
     img_size: u32,
     color: Rgba<u8>,
 ) {
-    for (way, _width) in ways {
+    for way in ways {
         for w in way.windows(2) {
             let (x0, y0) =
                 lon_lat_to_pixel(w[0].0, w[0].1, min_lon, min_lat, max_lon, max_lat, img_size);
@@ -269,13 +277,6 @@ fn draw_buildings(
     }
 }
 
-fn interpolate(c1: Rgba<u8>, c2: Rgba<u8>, t: f32) -> Rgba<u8> {
-    c1.map2(&c2, |a, b| {
-        let a = a as f32;
-        let b = b as f32;
-        (a * (1.0 - t) + b * t) as u8
-    })
-}
 
 fn draw_path(
     img: &mut RgbaImage,
@@ -352,7 +353,7 @@ fn stitch_images(
     let total_height = img_size * tiles_y as u32;
 
     // Create a new image with a black background
-    let mut stitched_image = RgbaImage::new(total_width, total_height);
+    let stitched_image = RgbaImage::new(total_width, total_height);
 
     // Wrap stitched_image in an Arc to allow sharing among threads
     let stitched_image = Arc::new(stitched_image);

@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct CachedData {
     pub nodes: HashMap<i64, (f64, f64)>,
-    pub highways: Vec<(Vec<(f64, f64)>, u32)>,
-    pub waterways: Vec<(Vec<(f64, f64)>, u32)>,
-    pub railways: Vec<(Vec<(f64, f64)>, u32)>,
+    pub highways: Vec<Vec<(f64, f64)>>,
+    pub waterways: Vec<Vec<(f64, f64)>>,
+    pub railways: Vec<Vec<(f64, f64)>>,
     pub buildings: Vec<Vec<(f64, f64)>>,
     pub graph: HashMap<Coord, Vec<Edge>>,
 }
@@ -41,3 +41,5 @@ pub struct Edge {
     pub target: Coord, // (lat, lon)
     pub cost: i64,
 }
+
+pub type WayCoords = Vec<(f64, f64)>;
