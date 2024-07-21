@@ -16,6 +16,6 @@ pub fn save_cache<T: SerializableData>(
     data: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let serialized_data = bincode::serialize(data)?;
-    //fs::write(filename, serialized_data)?;
+    fs::write(filename, serialized_data)?;
     Ok(())
 }

@@ -23,8 +23,8 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let (nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolyons, graph) =
-        load_or_parse_data(&filename);
+    let (_nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolyons, graph) =
+        load_or_parse_data(filename);
 
     // Run A* search
     let path_result = run_a_star(&highways, graph);
@@ -121,12 +121,12 @@ fn load_or_parse_data(
     data
 }
 
-fn run_a_star(highways: &Vec<WayCoords>, graph: HashMap<Coord, Vec<Edge>>) -> Vec<Coord> {
+fn run_a_star(highways: &[WayCoords], graph: HashMap<Coord, Vec<Edge>>) -> Vec<Coord> {
     let a_star_start_time = Instant::now();
     // pick a random node from nodes as start and goal
 
-    let start_random = get_random_node(&highways);
-    let goal_random = get_random_node(&highways);
+    let start_random = get_random_node(highways);
+    let goal_random = get_random_node(highways);
     let start_random_coord = Coord {
         lat: start_random.1,
         lon: start_random.0,

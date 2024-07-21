@@ -413,7 +413,7 @@ fn stitch_images(
     tile_coordinates.par_iter().for_each(|&(x, y)| {
         let start_time = Instant::now();
         let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
-        let tile_image = image::open(&file_name).unwrap().to_rgba8();
+        let tile_image = image::open(file_name).unwrap().to_rgba8();
         let (width, height) = tile_image.dimensions();
 
         // Calculate the starting position on the stitched image
