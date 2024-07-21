@@ -12,7 +12,10 @@ pub fn read_osm_data(
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
+    Vec<WayCoords>,
 ) {
+
+    // check if the file exists
     let r = std::fs::File::open(std::path::Path::new(filename)).unwrap();
     let mut pbf = OsmPbfReader::new(r);
 
@@ -21,6 +24,7 @@ pub fn read_osm_data(
     let mut waterways: Vec<WayCoords> = Vec::new();
     let mut railways: Vec<WayCoords> = Vec::new();
     let mut buildings: Vec<WayCoords> = Vec::new();
+    let mut naturals: Vec<WayCoords> = Vec::new();
 
     for obj in pbf.par_iter().map(Result::unwrap) {
         match obj {
@@ -37,12 +41,19 @@ pub fn read_osm_data(
                     railways.push(way_nodes);
                 } else if way.tags.get("building").is_some() {
                     buildings.push(way_nodes);
+                } else if way.tags.get("natural").is_some() {
+                    // natural=coastline is a special case
+                    print!("{:?}", way.tags.get("natural"));
+/*                      if way.tags.get("natural").unwrap() == "coastline" {
+                        naturals.push(way_nodes);
+                    }  */
+                    naturals.push(way_nodes);
                 }
             }
             OsmObj::Relation(_) => {}
         }
     }
-    (nodes, highways, waterways, railways, buildings)
+    (nodes, highways, waterways, railways, buildings, naturals)
 }
 
 pub fn extract_way_nodes(way: &Way, nodes: &HashMap<i64, (f64, f64)>) -> WayCoords {

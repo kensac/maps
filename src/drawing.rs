@@ -1,4 +1,6 @@
 use image::{Pixel, Rgba, RgbaImage};
+use imageproc::drawing::draw_polygon_mut;
+use imageproc::point::Point;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
 use std::io::BufWriter;
@@ -116,6 +118,7 @@ pub fn draw_map(
     waterways: &[Vec<(f64, f64)>],
     railways: &[Vec<(f64, f64)>],
     buildings: &[Vec<(f64, f64)>],
+    naturals: &[Vec<(f64, f64)>],
     path: &[(f64, f64)],
 ) {
     if highways.is_empty() && waterways.is_empty() && railways.is_empty() && buildings.is_empty() {
@@ -151,6 +154,28 @@ pub fn draw_map(
 
         let mut img: image::ImageBuffer<Rgba<u8>, Vec<u8>> = RgbaImage::new(img_size, img_size);
 
+        draw_buildings(
+            &mut img,
+            buildings,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([255, 255, 0, 100]), // Yellow
+        );
+
+        draw_buildings(
+            &mut img,
+            naturals,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([0, 255, 0, 100]), // Green
+        );
+
         draw_ways(
             &mut img,
             highways,
@@ -182,17 +207,6 @@ pub fn draw_map(
             Rgba([255, 0, 0, 255]),
         );
 
-        draw_buildings(
-            &mut img,
-            buildings,
-            tile_min_lon,
-            tile_min_lat,
-            tile_max_lon,
-            tile_max_lat,
-            img_size,
-            Rgba([255, 255, 0, 255]), // Yellow
-        );
-
         draw_path(
             &mut img,
             path,
@@ -202,7 +216,7 @@ pub fn draw_map(
             tile_max_lat,
             img_size,
             Rgba([0, 255, 0, 255]),
-            4, // Added parameter for line thickness
+            4,
         );
 
         let file_name = format!("osm_map_{}_{}.png", x, y);
@@ -256,27 +270,30 @@ fn draw_buildings(
     color: Rgba<u8>,
 ) {
     for building in buildings {
-        let pixels: Vec<(i32, i32)> = building
-            .iter()
-            .map(|&(lon, lat)| {
-                lon_lat_to_pixel(lon, lat, min_lon, min_lat, max_lon, max_lat, img_size)
-            })
-            .collect();
+        let mut pixels = Vec::new();
 
-        if pixels.len() > 1 {
-            for w in pixels.windows(2) {
-                draw_line_wu(img, w[0].0, w[0].1, w[1].0, w[1].1, color);
+        for point in building {
+            let (x, y) = lon_lat_to_pixel(
+                point.0, point.1, min_lon, min_lat, max_lon, max_lat, img_size,
+            );
+            let new_point = Point::new(x, y);
+            if !pixels.contains(&new_point) {
+                pixels.push(new_point);
             }
-            // Close the polygon
-            if let Some(first) = pixels.first() {
-                if let Some(last) = pixels.last() {
-                    draw_line_wu(img, first.0, first.1, last.0, last.1, color);
+        }
+
+        // make sure the polygon is not closed
+        if let Some(first) = pixels.first() {
+            if let Some(last) = pixels.last() {
+                if first == last {
+                    pixels.pop();
                 }
             }
         }
+
+        draw_polygon_mut(img, &pixels, color);
     }
 }
-
 
 fn draw_path(
     img: &mut RgbaImage,

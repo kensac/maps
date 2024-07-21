@@ -12,6 +12,8 @@ use std::ffi::OsStr;
 use std::time::Instant;
 
 fn main() {
+    // set RUST_BACKTRACE=1 to see backtrace
+    std::env::set_var("RUST_BACKTRACE", "1");
     let start_time = Instant::now();
 
     let args: Vec<_> = std::env::args_os().collect();
@@ -21,9 +23,8 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let cache_filename = format!("{}.cache", filename.to_str().unwrap());
-    let (nodes, highways, waterways, railways, buildings, graph) =
-        load_or_parse_data(cache_filename.as_ref());
+    let (nodes, highways, waterways, railways, buildings, naturals, graph) =
+        load_or_parse_data(&filename);
 
     // Run A* search
     let path_result = run_a_star(&highways, graph);
@@ -39,6 +40,7 @@ fn main() {
         &waterways,
         &railways,
         &buildings,
+        &naturals,
         &path_result_f64,
     );
     let draw_duration = draw_start_time.elapsed();
@@ -56,10 +58,14 @@ fn load_or_parse_data(
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
+    Vec<WayCoords>,
     HashMap<Coord, Vec<Edge>>,
 ) {
     let start_time = Instant::now();
-    let data = if let Ok(cached_data) = load_cache::<CachedData>(&filename.to_str().unwrap()) {
+    let cache_filename = format!("{}.cache", filename.to_str().unwrap());
+    let data = if let Ok(cached_data) =
+        load_cache::<CachedData>(&cache_filename)
+    {
         println!("Loaded data from cache.");
         println!("Loaded data in {:?}", start_time.elapsed());
         (
@@ -68,6 +74,7 @@ fn load_or_parse_data(
             cached_data.waterways,
             cached_data.railways,
             cached_data.buildings,
+            cached_data.naturals,
             cached_data.graph,
         )
     } else {
@@ -89,10 +96,11 @@ fn load_or_parse_data(
             parsed_data.2,
             parsed_data.3,
             parsed_data.4,
+            parsed_data.5,
             graph,
         );
-
-        save_cache(&filename, &return_data).expect("Failed to save cache.");
+        
+        save_cache(OsStr::new(&cache_filename), &return_data).expect("Failed to save cache.");
         let save_duration = save_start_time.elapsed();
         println!("Cache saved in {:?}", save_duration);
         return_data
