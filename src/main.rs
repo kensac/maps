@@ -23,7 +23,7 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let (nodes, highways, waterways, railways, buildings, naturals, multipolyons, graph) =
+    let (nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolyons, graph) =
         load_or_parse_data(&filename);
 
     // Run A* search
@@ -41,6 +41,7 @@ fn main() {
         &railways,
         &buildings,
         &naturals,
+        &aeroways,
         &multipolyons,
         &path_result_f64,
     );
@@ -55,6 +56,7 @@ fn load_or_parse_data(
     filename: &OsStr,
 ) -> (
     HashMap<i64, (f64, f64)>,
+    Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
@@ -75,6 +77,7 @@ fn load_or_parse_data(
             cached_data.railways,
             cached_data.buildings,
             cached_data.naturals,
+            cached_data.aeroways,
             cached_data.multipolygons,
             cached_data.graph,
         )
@@ -99,6 +102,7 @@ fn load_or_parse_data(
             parsed_data.4,
             parsed_data.5,
             parsed_data.6,
+            parsed_data.7,
             graph,
         );
 

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::OsStr};
 
-use osmpbfreader::{OsmObj, OsmPbfReader, Way, Relation, OsmId};
+use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation, Way};
 
 use crate::types::WayCoords;
 
@@ -8,6 +8,7 @@ pub fn read_osm_data(
     filename: &OsStr,
 ) -> (
     HashMap<i64, (f64, f64)>,
+    Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
@@ -25,6 +26,7 @@ pub fn read_osm_data(
     let mut railways: Vec<WayCoords> = Vec::new();
     let mut buildings: Vec<WayCoords> = Vec::new();
     let mut naturals: Vec<WayCoords> = Vec::new();
+    let mut aeroways: Vec<WayCoords> = Vec::new();
     let mut multipolygons: Vec<Vec<WayCoords>> = Vec::new();
 
     let mut ways: HashMap<i64, Way> = HashMap::new();
@@ -48,6 +50,8 @@ pub fn read_osm_data(
                     buildings.push(way_nodes);
                 } else if way.tags.get("natural").is_some() {
                     naturals.push(way_nodes);
+                } else if way.tags.get("aeroway").is_some() {
+                    aeroways.push(way_nodes);
                 }
             }
             OsmObj::Relation(relation) => {
@@ -77,6 +81,7 @@ pub fn read_osm_data(
         railways,
         buildings,
         naturals,
+        aeroways,
         multipolygons,
     )
 }

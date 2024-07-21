@@ -119,6 +119,7 @@ pub fn draw_map(
     railways: &[Vec<(f64, f64)>],
     buildings: &[Vec<(f64, f64)>],
     naturals: &[Vec<(f64, f64)>],
+    aeroways: &[Vec<(f64, f64)>],
     multipolygons: &[Vec<Vec<(f64, f64)>>], // Added multipolygons parameter
     path: &[(f64, f64)],
 ) {
@@ -142,7 +143,7 @@ pub fn draw_map(
 
     let tiles_x = 20;
     let tiles_y = 20;
-    let img_size: u32 = 4096 * 2;
+    let img_size: u32 = 4096;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
     let lat_step = (max_lat - min_lat) / tiles_y as f64;
@@ -184,15 +185,24 @@ pub fn draw_map(
 
         draw_buildings(
             &mut img,
+            aeroways,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([169, 169, 169, 255]),
+        );
+
+        draw_buildings(
+            &mut img,
             buildings,
             tile_min_lon,
             tile_min_lat,
             tile_max_lon,
             tile_max_lat,
             img_size,
-            Rgba([
-                245, 245, 220, 255
-            ]), //beige
+            Rgba([245, 245, 220, 255]), //beige
         );
 
         draw_ways(
