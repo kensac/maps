@@ -9,6 +9,7 @@ pub fn read_osm_data(
     Vec<(Vec<(f64, f64)>, u32)>,
     Vec<(Vec<(f64, f64)>, u32)>,
     Vec<(Vec<(f64, f64)>, u32)>,
+    Vec<Vec<(f64, f64)>>,
 ) {
     let r = std::fs::File::open(std::path::Path::new(filename)).unwrap();
     let mut pbf = OsmPbfReader::new(r);
@@ -17,6 +18,7 @@ pub fn read_osm_data(
     let mut highways: Vec<(Vec<(f64, f64)>, u32)> = Vec::new();
     let mut waterways: Vec<(Vec<(f64, f64)>, u32)> = Vec::new();
     let mut railways: Vec<(Vec<(f64, f64)>, u32)> = Vec::new();
+    let mut buildings: Vec<Vec<(f64, f64)>> = Vec::new();
 
     for obj in pbf.par_iter().map(Result::unwrap) {
         match obj {
@@ -26,17 +28,19 @@ pub fn read_osm_data(
             OsmObj::Way(way) => {
                 let way_nodes = extract_way_nodes(&way, &nodes);
                 if way.tags.get("highway").is_some() {
-                    highways.push(way_nodes);
+                    highways.push((way_nodes.0, way_nodes.1));
                 } else if way.tags.get("waterway").is_some() {
-                    waterways.push(way_nodes);
+                    waterways.push((way_nodes.0, way_nodes.1));
                 } else if way.tags.get("railway").is_some() {
-                    railways.push(way_nodes);
+                    railways.push((way_nodes.0, way_nodes.1));
+                } else if way.tags.get("building").is_some() {
+                    buildings.push(way_nodes.0);
                 }
             }
             OsmObj::Relation(_) => {}
         }
     }
-    (nodes, highways, waterways, railways)
+    (nodes, highways, waterways, railways, buildings)
 }
 
 pub fn extract_way_nodes(way: &Way, nodes: &HashMap<i64, (f64, f64)>) -> (Vec<(f64, f64)>, u32) {

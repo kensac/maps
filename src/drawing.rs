@@ -107,9 +107,10 @@ pub fn draw_map(
     highways: &[(Vec<(f64, f64)>, u32)],
     waterways: &[(Vec<(f64, f64)>, u32)],
     railways: &[(Vec<(f64, f64)>, u32)],
+    buildings: &[Vec<(f64, f64)>],
     path: &[(f64, f64)],
 ) {
-    if highways.is_empty() && waterways.is_empty() && railways.is_empty() {
+    if highways.is_empty() && waterways.is_empty() && railways.is_empty() && buildings.is_empty() {
         println!("No ways to draw.");
         return;
     }
@@ -122,10 +123,9 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 20;
-    let tiles_y = 20;
+    let tiles_x = 5;
+    let tiles_y = 5;
     let img_size: u32 = 4096 * 2;
-    let subgroups = 2;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
     let lat_step = (max_lat - min_lat) / tiles_y as f64;
@@ -186,6 +186,17 @@ pub fn draw_map(
             4, // Added parameter for line thickness
         );
 
+        draw_buildings(
+            &mut img,
+            buildings,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([255, 255, 0, 255]), // Yellow
+        );
+
         let file_name = format!("osm_map_{}_{}.png", x, y);
         img.save(&file_name).unwrap();
         println!("Tile {}_{} rendered in {:?}", x, y, time_start.elapsed());
@@ -193,6 +204,7 @@ pub fn draw_map(
 
     stitch_images(tiles_x, tiles_y, img_size, "osm_map", "stitched_map.png");
 }
+
 fn draw_ways(
     img: &mut RgbaImage,
     ways: &[(Vec<(f64, f64)>, u32)],
@@ -220,6 +232,39 @@ fn draw_ways(
                 && y1 < img_size as i32
             {
                 draw_line_wu(img, x0, y0, x1, y1, color);
+            }
+        }
+    }
+}
+
+fn draw_buildings(
+    img: &mut RgbaImage,
+    buildings: &[Vec<(f64, f64)>],
+    min_lon: f64,
+    min_lat: f64,
+    max_lon: f64,
+    max_lat: f64,
+    img_size: u32,
+    color: Rgba<u8>,
+) {
+    for building in buildings {
+        let pixels: Vec<(i32, i32)> = building
+            .iter()
+            .map(|&(lon, lat)| {
+                lon_lat_to_pixel(lon, lat, min_lon, min_lat, max_lon, max_lat, img_size)
+            })
+            .collect();
+
+        if pixels.len() > 1 {
+            println!("Drawing building with {} points", pixels.len());
+            for w in pixels.windows(2) {
+                draw_line_wu(img, w[0].0, w[0].1, w[1].0, w[1].1, color);
+            }
+            // Close the polygon
+            if let Some(first) = pixels.first() {
+                if let Some(last) = pixels.last() {
+                    draw_line_wu(img, first.0, first.1, last.0, last.1, color);
+                }
             }
         }
     }

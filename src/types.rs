@@ -11,6 +11,7 @@ pub struct CachedData {
     pub highways: Vec<(Vec<(f64, f64)>, u32)>,
     pub waterways: Vec<(Vec<(f64, f64)>, u32)>,
     pub railways: Vec<(Vec<(f64, f64)>, u32)>,
+    pub buildings: Vec<Vec<(f64, f64)>>,
     pub graph: HashMap<Coord, Vec<Edge>>,
 }
 

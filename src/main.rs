@@ -1,7 +1,7 @@
 extern crate osmpbfreader;
 extern crate rand;
 
-use maps::cache::{load_cache, save_cache};
+use maps::cache::{self, load_cache, save_cache};
 use maps::drawing::draw_map;
 use maps::graph::find_path;
 use maps::osm::read_osm_data;
@@ -29,7 +29,7 @@ fn main() {
 
     let start_time = Instant::now();
 
-    let (_nodes, highways, waterways, railways, graph) =
+    let (_nodes, highways, waterways, railways, buildings, graph) =
         if let Ok(cached_data) = load_cache::<CachedData>(&cache_filename) {
             println!("Loaded data from cache.");
             (
@@ -37,6 +37,7 @@ fn main() {
                 cached_data.highways,
                 cached_data.waterways,
                 cached_data.railways,
+                cached_data.buildings,
                 cached_data.graph,
             )
         } else {
@@ -57,6 +58,7 @@ fn main() {
                 parsed_data.1,
                 parsed_data.2,
                 parsed_data.3,
+                parsed_data.4,
                 graph,
             );
 
@@ -115,10 +117,12 @@ fn main() {
         &highways,
         &waterways,
         &railways,
+        &buildings,
         &path_result
             .iter()
             .map(|&coord| (coord.lon, coord.lat))
             .collect::<Vec<_>>(),
+            
     );
     let draw_duration = draw_start_time.elapsed();
     println!("Map drawn in {:?}", draw_duration);
