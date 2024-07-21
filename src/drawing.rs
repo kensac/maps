@@ -123,8 +123,8 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 5;
-    let tiles_y = 5;
+    let tiles_x = 20;
+    let tiles_y = 20;
     let img_size: u32 = 4096 * 2;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
@@ -174,6 +174,17 @@ pub fn draw_map(
             Rgba([255, 0, 0, 255]),
         );
 
+        draw_buildings(
+            &mut img,
+            buildings,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([255, 255, 0, 255]), // Yellow
+        );
+
         draw_path(
             &mut img,
             path,
@@ -184,17 +195,6 @@ pub fn draw_map(
             img_size,
             Rgba([0, 255, 0, 255]),
             4, // Added parameter for line thickness
-        );
-
-        draw_buildings(
-            &mut img,
-            buildings,
-            tile_min_lon,
-            tile_min_lat,
-            tile_max_lon,
-            tile_max_lat,
-            img_size,
-            Rgba([255, 255, 0, 255]), // Yellow
         );
 
         let file_name = format!("osm_map_{}_{}.png", x, y);
@@ -256,7 +256,6 @@ fn draw_buildings(
             .collect();
 
         if pixels.len() > 1 {
-            println!("Drawing building with {} points", pixels.len());
             for w in pixels.windows(2) {
                 draw_line_wu(img, w[0].0, w[0].1, w[1].0, w[1].1, color);
             }
