@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::OsStr};
 
-use osmpbfreader::{OsmObj, OsmPbfReader, Way};
+use osmpbfreader::{OsmObj, OsmPbfReader, Way, Relation, OsmId};
 
 use crate::types::WayCoords;
 
@@ -13,9 +13,9 @@ pub fn read_osm_data(
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
+    Vec<Vec<WayCoords>>, // Multipolygons
 ) {
-
-    // check if the file exists
+    // Check if the file exists
     let r = std::fs::File::open(std::path::Path::new(filename)).unwrap();
     let mut pbf = OsmPbfReader::new(r);
 
@@ -25,6 +25,10 @@ pub fn read_osm_data(
     let mut railways: Vec<WayCoords> = Vec::new();
     let mut buildings: Vec<WayCoords> = Vec::new();
     let mut naturals: Vec<WayCoords> = Vec::new();
+    let mut multipolygons: Vec<Vec<WayCoords>> = Vec::new();
+
+    let mut ways: HashMap<i64, Way> = HashMap::new();
+    let mut relations: Vec<Relation> = Vec::new();
 
     for obj in pbf.par_iter().map(Result::unwrap) {
         match obj {
@@ -32,6 +36,7 @@ pub fn read_osm_data(
                 nodes.insert(node.id.0, (node.lon(), node.lat()));
             }
             OsmObj::Way(way) => {
+                ways.insert(way.id.0, way.clone());
                 let way_nodes = extract_way_nodes(&way, &nodes);
                 if way.tags.get("highway").is_some() {
                     highways.push(way_nodes);
@@ -42,18 +47,38 @@ pub fn read_osm_data(
                 } else if way.tags.get("building").is_some() {
                     buildings.push(way_nodes);
                 } else if way.tags.get("natural").is_some() {
-                    // natural=coastline is a special case
-                    print!("{:?}", way.tags.get("natural"));
-/*                      if way.tags.get("natural").unwrap() == "coastline" {
-                        naturals.push(way_nodes);
-                    }  */
                     naturals.push(way_nodes);
                 }
             }
-            OsmObj::Relation(_) => {}
+            OsmObj::Relation(relation) => {
+                relations.push(relation);
+            }
         }
     }
-    (nodes, highways, waterways, railways, buildings, naturals)
+
+    for relation in relations {
+        if relation.tags.get("type") == Some(&smartstring::alias::String::from("multipolygon")) {
+            let mut multipolygon_ways: Vec<WayCoords> = Vec::new();
+            for member in &relation.refs {
+                if let OsmId::Way(id) = member.member {
+                    if let Some(way) = ways.get(&id.0) {
+                        multipolygon_ways.push(extract_way_nodes(way, &nodes));
+                    }
+                }
+            }
+            multipolygons.push(multipolygon_ways);
+        }
+    }
+
+    (
+        nodes,
+        highways,
+        waterways,
+        railways,
+        buildings,
+        naturals,
+        multipolygons,
+    )
 }
 
 pub fn extract_way_nodes(way: &Way, nodes: &HashMap<i64, (f64, f64)>) -> WayCoords {

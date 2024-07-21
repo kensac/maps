@@ -13,6 +13,7 @@ pathfinding = "4.10.0"
 rand = "0.8.5"
 rayon = "1.10.0"
 serde = { version = "1.0.204", features = ["derive"] }
+smartstring = "1.0.1"
 threadpool = "1.8.1"
 
 [profile.release]

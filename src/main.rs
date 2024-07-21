@@ -23,7 +23,7 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let (nodes, highways, waterways, railways, buildings, naturals, graph) =
+    let (nodes, highways, waterways, railways, buildings, naturals, multipolyons, graph) =
         load_or_parse_data(&filename);
 
     // Run A* search
@@ -41,6 +41,7 @@ fn main() {
         &railways,
         &buildings,
         &naturals,
+        &multipolyons,
         &path_result_f64,
     );
     let draw_duration = draw_start_time.elapsed();
@@ -59,13 +60,12 @@ fn load_or_parse_data(
     Vec<WayCoords>,
     Vec<WayCoords>,
     Vec<WayCoords>,
+    Vec<Vec<WayCoords>>,
     HashMap<Coord, Vec<Edge>>,
 ) {
     let start_time = Instant::now();
     let cache_filename = format!("{}.cache", filename.to_str().unwrap());
-    let data = if let Ok(cached_data) =
-        load_cache::<CachedData>(&cache_filename)
-    {
+    let data = if let Ok(cached_data) = load_cache::<CachedData>(&cache_filename) {
         println!("Loaded data from cache.");
         println!("Loaded data in {:?}", start_time.elapsed());
         (
@@ -75,6 +75,7 @@ fn load_or_parse_data(
             cached_data.railways,
             cached_data.buildings,
             cached_data.naturals,
+            cached_data.multipolygons,
             cached_data.graph,
         )
     } else {
@@ -97,9 +98,10 @@ fn load_or_parse_data(
             parsed_data.3,
             parsed_data.4,
             parsed_data.5,
+            parsed_data.6,
             graph,
         );
-        
+
         save_cache(OsStr::new(&cache_filename), &return_data).expect("Failed to save cache.");
         let save_duration = save_start_time.elapsed();
         println!("Cache saved in {:?}", save_duration);

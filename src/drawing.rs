@@ -119,9 +119,15 @@ pub fn draw_map(
     railways: &[Vec<(f64, f64)>],
     buildings: &[Vec<(f64, f64)>],
     naturals: &[Vec<(f64, f64)>],
+    multipolygons: &[Vec<Vec<(f64, f64)>>], // Added multipolygons parameter
     path: &[(f64, f64)],
 ) {
-    if highways.is_empty() && waterways.is_empty() && railways.is_empty() && buildings.is_empty() {
+    if highways.is_empty()
+        && waterways.is_empty()
+        && railways.is_empty()
+        && buildings.is_empty()
+        && multipolygons.is_empty()
+    {
         println!("No ways to draw.");
         return;
     }
@@ -134,9 +140,9 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 2;
-    let tiles_y = 2;
-    let img_size: u32 = 4096;
+    let tiles_x = 20;
+    let tiles_y = 20;
+    let img_size: u32 = 4096 * 2;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
     let lat_step = (max_lat - min_lat) / tiles_y as f64;
@@ -156,17 +162,6 @@ pub fn draw_map(
 
         draw_buildings(
             &mut img,
-            buildings,
-            tile_min_lon,
-            tile_min_lat,
-            tile_max_lon,
-            tile_max_lat,
-            img_size,
-            Rgba([255, 255, 0, 100]), // Yellow
-        );
-
-        draw_buildings(
-            &mut img,
             naturals,
             tile_min_lon,
             tile_min_lat,
@@ -174,6 +169,30 @@ pub fn draw_map(
             tile_max_lat,
             img_size,
             Rgba([0, 255, 0, 100]), // Green
+        );
+
+        draw_multipolygons(
+            &mut img,
+            multipolygons,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([128, 128, 128, 100]), // Gray
+        );
+
+        draw_buildings(
+            &mut img,
+            buildings,
+            tile_min_lon,
+            tile_min_lat,
+            tile_max_lon,
+            tile_max_lat,
+            img_size,
+            Rgba([
+                245, 245, 220, 255
+            ]), //beige
         );
 
         draw_ways(
@@ -411,4 +430,52 @@ fn stitch_images(
     stitched_image
         .write_to(fout, image::ImageFormat::Png)
         .unwrap();
+}
+
+fn draw_multipolygons(
+    img: &mut RgbaImage,
+    multipolygons: &[Vec<Vec<(f64, f64)>>],
+    min_lon: f64,
+    min_lat: f64,
+    max_lon: f64,
+    max_lat: f64,
+    img_size: u32,
+    base_color: Rgba<u8>,
+) {
+    for multipolygon in multipolygons {
+        let mut polygon_points: Vec<Point<i32>> = Vec::new();
+
+        for (i, polygon) in multipolygon.iter().enumerate() {
+            for &(lon, lat) in polygon {
+                let (x, y) =
+                    lon_lat_to_pixel(lon, lat, min_lon, min_lat, max_lon, max_lat, img_size);
+                let new_point = Point::new(x, y);
+                if !polygon_points.contains(&new_point) {
+                    polygon_points.push(new_point);
+                }
+            }
+
+            // make sure the polygon is not closed
+            if let Some(first) = polygon_points.first() {
+                if let Some(last) = polygon_points.last() {
+                    if first == last {
+                        polygon_points.pop();
+                    }
+                }
+            }
+
+            // Adjust color intensity for each polygon
+            let color_adjustment = (i as u8 * 30) % 255;
+            let adjusted_color = Rgba([
+                (base_color[0] as u16 + color_adjustment as u16) as u8 % 255,
+                (base_color[1] as u16 + color_adjustment as u16) as u8 % 255,
+                (base_color[2] as u16 + color_adjustment as u16) as u8 % 255,
+                base_color[3],
+            ]);
+
+            // Draw the polygon
+            draw_polygon_mut(img, &polygon_points, adjusted_color);
+            polygon_points.clear();
+        }
+    }
 }
