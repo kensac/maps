@@ -26,8 +26,17 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let (_nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolygons, graph) =
-        load_or_parse_data(filename);
+    let (
+        _nodes,
+        highways,
+        waterways,
+        railways,
+        buildings,
+        naturals,
+        aeroways,
+        multipolygons,
+        graph,
+    ) = load_or_parse_data(filename);
 
     // Run A* search
     let path_result = run_a_star(&highways, graph);
