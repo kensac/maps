@@ -5,10 +5,12 @@ use maps::cache::{load_cache, save_cache};
 use maps::drawing::draw_map;
 use maps::graph::find_path;
 use maps::osm::read_osm_data;
+use maps::traits::way::Way;
 use maps::types::cached_data::CachedData;
 use maps::types::cached_data::WayCoords;
 use maps::types::coord::Coord;
 use maps::types::edge::Edge;
+use maps::types::osm::highways;
 use maps::utils::get_random_node;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -25,6 +27,13 @@ fn main() {
     }
     let filename = &args[1];
 
+    let test_highways = highways::Highway::from_osm_file(filename);
+    println!("Highways: {:?}", test_highways.len());
+    println!("First highway: {:?}", test_highways[0].tags);
+    println!("First highway nodes: {:?}", test_highways[0].nodes);
+    println!("First highway id: {:?}", test_highways[0].id);
+
+
     // Check if cache exists
     let (
         _nodes,
@@ -37,6 +46,12 @@ fn main() {
         multipolygons,
         graph,
     ) = load_or_parse_data(filename);
+
+    println!("Highways: {:?}", highways.len());
+    println!("First highway: {:?}", highways[0]);
+
+    assert_eq!(test_highways.len(), highways.len());
+    return;
 
     // Run A* search
     let path_result = run_a_star(&highways, graph);
