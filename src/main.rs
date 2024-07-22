@@ -5,7 +5,10 @@ use maps::cache::{load_cache, save_cache};
 use maps::drawing::draw_map;
 use maps::graph::find_path;
 use maps::osm::read_osm_data;
-use maps::types::{CachedData, Coord, Edge, WayCoords};
+use maps::types::cached_data::CachedData;
+use maps::types::cached_data::WayCoords;
+use maps::types::coord::Coord;
+use maps::types::edge::Edge;
 use maps::utils::get_random_node;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -23,7 +26,7 @@ fn main() {
     let filename = &args[1];
 
     // Check if cache exists
-    let (_nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolyons, graph) =
+    let (_nodes, highways, waterways, railways, buildings, naturals, aeroways, multipolygons, graph) =
         load_or_parse_data(filename);
 
     // Run A* search
@@ -42,7 +45,7 @@ fn main() {
         &buildings,
         &naturals,
         &aeroways,
-        &multipolyons,
+        &multipolygons,
         &path_result_f64,
     );
     let draw_duration = draw_start_time.elapsed();

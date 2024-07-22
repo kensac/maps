@@ -3,3 +3,4 @@
 *.png
 *.cache
 .DS_Store
+.vscode

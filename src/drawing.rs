@@ -141,8 +141,11 @@ pub fn draw_map(
         min_lon, min_lat, max_lon, max_lat
     );
 
-    let tiles_x = 20;
-    let tiles_y = 20;
+    let output_dir = "temp";
+    std::fs::create_dir_all(output_dir).unwrap();
+
+    let tiles_x = 1;
+    let tiles_y = 1;
     let img_size: u32 = 4096;
 
     let lon_step = (max_lon - min_lon) / tiles_x as f64;
@@ -248,12 +251,12 @@ pub fn draw_map(
             4,
         );
 
-        let file_name = format!("osm_map_{}_{}.png", x, y);
+        let file_name = format!("{}/{}_{}.png", output_dir, x, y);
         img.save(&file_name).unwrap();
         println!("Tile {}_{} rendered in {:?}", x, y, time_start.elapsed());
     });
 
-    stitch_images(tiles_x, tiles_y, img_size, "osm_map", "stitched_map.png");
+    stitch_images(tiles_x, tiles_y, img_size, output_dir, "stitched_map.png");
 }
 
 fn draw_ways(
@@ -412,7 +415,7 @@ fn stitch_images(
     // Process each tile in parallel
     tile_coordinates.par_iter().for_each(|&(x, y)| {
         let start_time = Instant::now();
-        let file_name = format!("{}_{}_{}.png", tile_prefix, x, y);
+        let file_name = format!("{}/{}_{}.png", tile_prefix, x, y);
         let tile_image = image::open(file_name).unwrap().to_rgba8();
         let (width, height) = tile_image.dimensions();
 

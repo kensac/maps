@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::types::{Coord, Edge};
 use pathfinding::prelude::astar;
+
+use crate::types::{coord::Coord, edge::Edge};
 
 pub fn build_graph(highways: &[Vec<(f64, f64)>]) -> HashMap<Coord, Vec<Edge>> {
     let mut graph = HashMap::new();
@@ -9,14 +10,8 @@ pub fn build_graph(highways: &[Vec<(f64, f64)>]) -> HashMap<Coord, Vec<Edge>> {
         for window in way.windows(2) {
             let (lon1, lat1) = window[0];
             let (lon2, lat2) = window[1];
-            let start_id = Coord {
-                lat: lat1,
-                lon: lon1,
-            };
-            let end_id = Coord {
-                lat: lat2,
-                lon: lon2,
-            };
+            let start_id = Coord::new(lon1, lat1);
+            let end_id = Coord::new(lon2, lat2);
 
             let cost = haversine_distance(lon1, lat1, lon2, lat2);
 

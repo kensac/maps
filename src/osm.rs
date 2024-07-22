@@ -2,7 +2,7 @@ use std::{collections::HashMap, ffi::OsStr};
 
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation, Way};
 
-use crate::types::WayCoords;
+use crate::types::cached_data::WayCoords;
 
 pub fn read_osm_data(
     filename: &OsStr,
