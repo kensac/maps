@@ -27,22 +27,23 @@ fn demultiply(data: &mut [u8]) {
     }
 }
 
-fn encode_png(pixmap: Pixmap) -> Result<Vec<u8>> {
+/// Encodes a rendered pixmap as PNG without consuming it, so callers can
+/// reuse the pixmap's buffer for the next render.
+pub fn encode_png(pixmap: &Pixmap) -> Result<Vec<u8>> {
     let (w, h) = (pixmap.width(), pixmap.height());
-    let mut data = pixmap.take();
+    let src = pixmap.data();
     // Most tiles are fully opaque: drop the alpha channel for them.
-    let opaque = data.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
-    let color = if opaque {
-        let mut write = 0;
-        for read in (0..data.len()).step_by(4) {
-            data.copy_within(read..read + 3, write);
-            write += 3;
+    let opaque = src.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
+    let (color, data) = if opaque {
+        let mut rgb = Vec::with_capacity(src.len() / 4 * 3);
+        for px in src.as_chunks::<4>().0 {
+            rgb.extend_from_slice(&px[..3]);
         }
-        data.truncate(write);
-        png::ColorType::Rgb
+        (png::ColorType::Rgb, rgb)
     } else {
-        demultiply(&mut data);
-        png::ColorType::Rgba
+        let mut rgba = src.to_vec();
+        demultiply(&mut rgba);
+        (png::ColorType::Rgba, rgba)
     };
     let mut out = Vec::with_capacity(data.len() / 4);
     let mut enc = png::Encoder::new(&mut out, w, h);
@@ -82,7 +83,7 @@ pub fn count_tiles(bounds: &Rect, min_zoom: u8, max_zoom: u8) -> u64 {
 /// level and overflow worker stacks on big pyramids.
 #[inline(never)]
 fn write_tile(renderer: &Renderer, dir: &Path, z: u8, x: u32, y: u32, scale: f32) -> Result<u64> {
-    let png = encode_png(renderer.render(&Viewport::tile(z, x, y, scale)))?;
+    let png = encode_png(&renderer.render(&Viewport::tile(z, x, y, scale)))?;
     let path = dir.join(format!("{z}/{x}/{y}.png"));
     fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
     Ok(png.len() as u64)
@@ -162,26 +163,50 @@ pub enum PosterSize {
     Zoom(f64),
 }
 
-/// Renders `region` (normalized Mercator) into one PNG. The image is drawn in
-/// horizontal bands on all cores and streamed to the encoder in order, so
-/// memory stays bounded even for gigapixel output.
+/// Renders `region` (normalized Mercator) into one PNG, rotated so that
+/// `bearing` points up; the image covers the rotated region's bounding box.
+/// The image is drawn in horizontal bands on all cores and streamed to the
+/// encoder in order, so memory stays bounded even for gigapixel output.
 pub fn write_poster(
     renderer: &Renderer,
     region: Rect,
     size: PosterSize,
     scale: f32,
+    bearing: f64,
+    pitch: f64,
     path: &Path,
 ) -> Result<()> {
     let tile = TILE_SIZE * scale as f64;
+    // Extent of the region in the rotated plane, per unit of world size.
+    let probe = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 1,
+        height: 1,
+        zoom: 0.0,
+        scale,
+        bearing,
+        pitch,
+        foreshorten: true,
+    };
+    let mut extent = Rect::EMPTY;
+    for p in [
+        [region.min_x, region.min_y],
+        [region.max_x, region.min_y],
+        [region.max_x, region.max_y],
+        [region.min_x, region.max_y],
+    ] {
+        extent.extend(probe.forward(p));
+    }
     let (world_px, zoom) = match size {
         PosterSize::Width(w) => {
-            let world = w as f64 / region.width();
+            let world = w as f64 / extent.width();
             (world, (world / tile).log2())
         }
         PosterSize::Zoom(z) => (tile * z.exp2(), z),
     };
-    let width = (region.width() * world_px).round() as u32;
-    let height = (region.height() * world_px).round() as u32;
+    let width = (extent.width() * world_px).round() as u32;
+    let height = (extent.height() * world_px).round() as u32;
     ensure!(width > 0 && height > 0, "empty output region");
     ensure!(
         (width as u64) * (height as u64) <= 4_000_000_000,
@@ -225,12 +250,15 @@ pub fn write_poster(
                 .par_iter()
                 .map(|&top| {
                     let vp = Viewport {
-                        x: region.min_x * world_px,
-                        y: region.min_y * world_px + top as f64,
+                        x: extent.min_x * world_px,
+                        y: extent.min_y * world_px + top as f64,
                         width,
                         height: band_rows.min(height - top),
                         zoom,
                         scale,
+                        bearing,
+                        pitch,
+                        foreshorten: true,
                     };
                     let mut data = renderer.render(&vp).take();
                     demultiply(&mut data);

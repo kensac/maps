@@ -31,7 +31,7 @@ fn mix(a: Hex, b: Hex, t: f32) -> Hex {
     ch(16) | ch(8) | ch(0)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, ValueEnum)]
 pub enum ThemeName {
     #[default]
     Light,
@@ -83,6 +83,9 @@ pub struct Theme {
     /// Extruded buildings: roof color and the wall color in full light.
     roof: Hex,
     facade: Hex,
+    /// Shoreline banks between land and the slightly lower water surface.
+    bank: Hex,
+    tree_trunk: Hex,
     shadow: (Hex, f32),
     tree: (Hex, f32),
     /// `(fill, casing)` per road class, major to minor.
@@ -106,6 +109,8 @@ pub struct Theme {
     aerialway: Hex,
     ferry: Hex,
     boundary: Hex,
+    /// How far physical object colors fade toward the land color (night).
+    object_dim: f32,
 }
 
 /// "Daylight": warm paper, soft teal water, one sage family for greenery,
@@ -154,6 +159,8 @@ pub const LIGHT: Theme = Theme {
     building_outline: 0xd5cabe,
     roof: 0xfbf9f5,
     facade: 0xddd2c6,
+    bank: 0xd9cfbf,
+    tree_trunk: 0x9c8269,
     shadow: (0x5a4a3a, 0.12),
     tree: (0x86b46e, 0.42),
     motorway: (0xf6c76e, 0xd69a3c),
@@ -176,6 +183,7 @@ pub const LIGHT: Theme = Theme {
     aerialway: 0x8f8a84,
     ferry: 0x6aa6c4,
     boundary: 0xb38bb0,
+    object_dim: 0.0,
 };
 
 /// "Midnight": blue-black land, deep ink water, streets that glow warmer
@@ -223,6 +231,8 @@ pub const DARK: Theme = Theme {
     building_outline: 0x20242d,
     roof: 0x3b4352,
     facade: 0x272d39,
+    bank: 0x2b3240,
+    tree_trunk: 0x3a3229,
     shadow: (0x000000, 0.35),
     tree: (0x3d8a68, 0.40),
     motorway: (0xf0a65e, 0x1a1e26),
@@ -245,6 +255,7 @@ pub const DARK: Theme = Theme {
     aerialway: 0x6b7280,
     ferry: 0x3c6aa0,
     boundary: 0x8c74b0,
+    object_dim: 0.55,
 };
 
 impl ThemeName {
@@ -281,6 +292,14 @@ pub struct StrokeSpec {
 pub struct LineStyle {
     pub casing: Option<StrokeSpec>,
     pub line: Option<StrokeSpec>,
+}
+
+/// Colors of a physical object; see [`Theme::object`].
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectPaint {
+    pub body: Color,
+    pub top: Color,
+    pub accent: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -414,13 +433,38 @@ impl Theme {
             BridgeArea => self.bridge,
             Platform => self.platform,
             RunwayArea => self.runway,
-            Building => self.building,
+            Building | Tank | Canopy | Bleachers | Tomb => self.building,
+            Pool => mix(self.water, 0x3fb5d9, 0.45),
+            Tidalflat => mix(self.wetland, self.sand, 0.5),
+            Reef => mix(self.water, self.sand, 0.35),
+            GolfRough => mix(self.golf, self.grass, 0.5),
+            GolfFairway => mix(self.golf, 0x6fbf5a, 0.2),
+            GolfGreen | GolfTee => mix(self.golf, 0x4fae46, 0.35),
+            GolfBunker => self.sand,
+            Tennis => mix(self.pitch, 0x5b8fbf, 0.35),
+            HardCourt => mix(self.parking, 0xc9a37a, 0.3),
+            Baseball => mix(self.sand, 0xc98a5a, 0.3),
+            Attraction => mix(self.park, self.retail, 0.5),
+            ParkingSpace => self.parking,
+            Fuel => mix(self.parking, self.commercial, 0.4),
+            OutdoorSeating => mix(self.retail, self.pedestrian, 0.5),
+            Planter => self.grass,
+            RoadArea => self.minor.0,
+            TrafficIsland => mix(self.grass, self.pedestrian, 0.4),
+            DamArea => mix(self.rock, self.pier, 0.5),
             _ => return None,
         };
         let s = c.scale;
         let outline = match kind {
             Building if c.zoom >= 15.0 => solid(rgb(self.building_outline), 0.6 * s),
-            Pitch | Parking if c.zoom >= 16.0 => solid(rgb(mix(fill, 0x000000, 0.12)), 0.6 * s),
+            Pitch | Parking | Tennis | HardCourt | Baseball if c.zoom >= 16.0 => {
+                solid(rgb(mix(fill, 0xffffff, 0.6)), 0.8 * s)
+            }
+            ParkingSpace => solid(rgb(mix(fill, 0x000000, 0.15)), 0.5 * s),
+            Pool if c.zoom >= 16.0 => solid(rgb(mix(fill, 0xffffff, 0.5)), 0.8 * s),
+            Tank | Canopy | Bleachers | Tomb if c.zoom >= 15.0 => {
+                solid(rgb(self.building_outline), 0.6 * s)
+            }
             Military if c.zoom >= 12.0 => solid(rgba(0xc24e4e, 0.5), 0.8 * s),
             _ => None,
         };
@@ -589,6 +633,42 @@ impl Theme {
                     line: dashed(rgba(self.boundary, 0.75), w, 6.0 * s, 3.0 * s),
                 }
             }
+            ApronLine => LineStyle {
+                casing: None,
+                line: solid(rgba(0xe8c33a, 0.85), (0.15 * c.ppm).max(0.6 * s)),
+            },
+            Kerb => LineStyle {
+                casing: None,
+                line: solid(rgba(self.building_outline, 0.8), 0.6 * s),
+            },
+            Embankment | Cliff => LineStyle {
+                casing: None,
+                line: solid(rgb(mix(self.rock, 0x000000, 0.2)), meters(1.5, 1.0)),
+            },
+            LowBarrier => LineStyle {
+                casing: None,
+                line: solid(rgb(mix(self.wall, self.land, 0.2)), meters(0.5, 0.8)),
+            },
+            Dam | Weir => LineStyle {
+                casing: None,
+                line: solid(rgb(mix(self.rock, self.pier, 0.5)), meters(4.0, 1.5)),
+            },
+            TreeRow => LineStyle {
+                casing: None,
+                line: solid(rgba(self.tree.0, self.tree.1), meters(5.0, 1.5)),
+            },
+            Pipeline => LineStyle {
+                casing: None,
+                line: solid(rgb(mix(self.power, 0x000000, 0.1)), meters(0.8, 0.8)),
+            },
+            Gantry => LineStyle {
+                casing: None,
+                line: solid(rgb(self.aerialway), meters(0.8, 1.0)),
+            },
+            JetBridge => LineStyle {
+                casing: solid(rgb(self.building_outline), meters(3.4, 1.5)),
+                line: solid(rgb(self.roof), meters(3.0, 1.2)),
+            },
             _ => LineStyle::default(),
         }
     }
@@ -601,13 +681,157 @@ impl Theme {
         )
     }
 
-    pub fn roof(&self) -> Color {
-        rgb(self.roof)
+    /// Roof color of an extruded solid.
+    pub fn roof(&self, kind: Kind) -> Color {
+        rgb(match kind {
+            Kind::Tank => mix(self.roof, 0xb8c0c8, 0.5),
+            Kind::Canopy => mix(self.roof, self.facade, 0.35),
+            Kind::Bleachers => mix(self.roof, 0x9aa3ad, 0.4),
+            Kind::Tomb => mix(self.roof, self.rock, 0.5),
+            _ => self.roof,
+        })
     }
 
-    /// Wall color for a facade receiving `light` ∈ [0, 1].
-    pub fn facade(&self, light: f32) -> Color {
-        rgb(mix(mix(self.facade, 0x000000, 0.22), self.facade, light))
+    /// Default color of pitched roofs (shingles, tiles).
+    pub fn pitched_roof(&self) -> Color {
+        rgb(mix(
+            mix(self.roof, 0x8a7f74, 0.45),
+            self.land,
+            self.object_dim,
+        ))
+    }
+
+    /// A mapped roof colour, adapted to the theme.
+    pub fn mapped_colour(&self, c: Hex) -> Color {
+        rgb(mix(c, self.land, self.object_dim))
+    }
+
+    /// A mapped facade colour, shaded like any wall.
+    pub fn mapped_facade(&self, c: Hex, light: f32) -> Color {
+        let c = mix(c, self.land, self.object_dim);
+        rgb(mix(mix(c, 0x000000, 0.22), c, light))
+    }
+
+    /// Window glass on a facade of color `wall`; lit windows glow at night.
+    pub fn window(&self, wall: Color, lit: bool) -> Color {
+        if lit {
+            return rgba(0xf2c66d, 0.85);
+        }
+        let glass = if self.night() { 0x1a2230 } else { 0x7d93a3 };
+        let k = if self.night() { 0.6 } else { 0.42 };
+        Color::from_rgba(
+            wall.red() + (((glass >> 16) & 0xff) as f32 / 255.0 - wall.red()) * k,
+            wall.green() + (((glass >> 8) & 0xff) as f32 / 255.0 - wall.green()) * k,
+            wall.blue() + ((glass & 0xff) as f32 / 255.0 - wall.blue()) * k,
+            1.0,
+        )
+        .unwrap_or(wall)
+    }
+
+    /// Whether this is a night theme.
+    pub fn night(&self) -> bool {
+        self.object_dim > 0.0
+    }
+
+    /// Wall color of an extruded solid receiving `light` ∈ [0, 1].
+    pub fn facade(&self, kind: Kind, light: f32) -> Color {
+        let base = match kind {
+            Kind::Tank => mix(self.facade, 0xa8b0b8, 0.5),
+            Kind::Bleachers => mix(self.facade, 0x8a939c, 0.4),
+            Kind::Tomb => mix(self.facade, self.rock, 0.5),
+            _ => self.facade,
+        };
+        rgb(mix(mix(base, 0x000000, 0.22), base, light))
+    }
+
+    pub fn bank(&self) -> Color {
+        rgb(self.bank)
+    }
+
+    pub fn trunk(&self) -> Color {
+        rgb(self.tree_trunk)
+    }
+
+    /// Vertical face of a barrier line (wall, hedge, fence, dam).
+    pub fn barrier_face(&self, kind: Kind) -> Option<Color> {
+        match kind {
+            Kind::Wall => Some(rgb(mix(self.wall, self.land, 0.35))),
+            Kind::Hedge => Some(rgb(mix(self.hedge, 0x000000, 0.15))),
+            Kind::Fence => Some(rgba(self.fence, 0.35)),
+            Kind::LowBarrier => Some(rgb(mix(self.wall, self.land, 0.2))),
+            Kind::Dam | Kind::Weir => Some(rgb(mix(self.rock, 0x000000, 0.1))),
+            _ => None,
+        }
+    }
+
+    /// Wires and beams strung between poles.
+    pub fn wire(&self, kind: Kind) -> Color {
+        match kind {
+            Kind::PowerLine => rgba(self.power, 0.8),
+            _ => rgb(self.aerialway),
+        }
+    }
+
+    /// Colors of a physical object: its body, its lit top, and an accent
+    /// (a lamp, a sign, a flag...). Real-world colors, dimmed at night.
+    pub fn object(&self, kind: Kind) -> ObjectPaint {
+        use Kind::*;
+        let (body, top, accent) = match kind {
+            Tree => (
+                self.tree.0,
+                mix(self.tree.0, 0xffffff, 0.35),
+                mix(self.tree.0, 0x1f4d2a, 0.45),
+            ),
+            Shrub => (mix(self.tree.0, 0x3d6b35, 0.3), self.tree.0, self.tree.0),
+            Stone => (0x9a948c, 0xbdb7ae, 0x9a948c),
+            StreetLamp => (0x5a5f66, 0x5a5f66, 0xffe7a8),
+            TrafficSignal => (0x4a4f55, 0x2b2e33, 0x4cc36a),
+            StopSign => (0x8a8f96, 0x8a8f96, 0xd8342c),
+            PowerPole => (0x7a5c3e, 0x7a5c3e, 0x7a5c3e),
+            PowerTower => (0x8d949c, 0x8d949c, 0x8d949c),
+            Flagpole => (0xc9ccd0, 0xc9ccd0, 0xe8e8ea),
+            Mast => (0xb0b4ba, 0xb0b4ba, 0xe0442c),
+            Chimney => (0x9c5a43, 0x7a4636, 0x9c5a43),
+            Tower => (0xbab4ab, 0xd6d0c7, 0xbab4ab),
+            WaterTower => (0x8a6a4c, 0x6e5a48, 0x8a6a4c),
+            Crane => (0xe0b02c, 0xe0b02c, 0xe0b02c),
+            Bollard => (0x55595f, 0x7a7e84, 0x55595f),
+            Block => (0xb3aea6, 0xcdc8bf, 0xb3aea6),
+            Hydrant => (0xc8322b, 0xe0554b, 0xc8322b),
+            Bench => (0x8a6646, 0xa8825c, 0x8a6646),
+            PicnicTable => (0x8a6646, 0xa8825c, 0x8a6646),
+            WasteBasket => (0x2f4a3a, 0x3e5e4b, 0x2f4a3a),
+            PostBox => (0x1f4a8c, 0x2e5fa8, 0x1f4a8c),
+            BicycleParking => (0x8d949c, 0xa8aeb5, 0x8d949c),
+            DrinkingWater => (0x4f6f7f, 0x6f8f9f, 0x4f6f7f),
+            Phone => (0x9aa3ab, 0xbac2c9, 0x9aa3ab),
+            SubwayEntrance => (0x2f5b3a, 0x3f7a4d, 0x4cc36a),
+            Shelter => (0x9fb3bf, 0xc7d6de, 0x9fb3bf),
+            Monument => (0xa8a196, 0xc7c0b5, 0xa8a196),
+            Artwork => (0x8a6a3a, 0xa8844c, 0x8a6a3a),
+            PlayEquipment => (0xd0553a, 0x3a7ad0, 0xe0b02c),
+            RailSignal => (0x3a3e44, 0x22252a, 0xd8342c),
+            BufferStop => (0xc8322b, 0xe8e8ea, 0xc8322b),
+            Cabinet => (0x6f7a6a, 0x8a9585, 0x6f7a6a),
+            Windsock => (0xc9ccd0, 0xc9ccd0, 0xf07a2a),
+            _ => (0xe8c33a, 0xe8c33a, 0xf2d24a),
+        };
+        let dim = |c: Hex| rgb(mix(c, self.land, self.object_dim));
+        ObjectPaint {
+            body: dim(body),
+            top: dim(top),
+            // Lights glow at night instead of dimming.
+            accent: if matches!(kind, StreetLamp | TrafficSignal | NavLight) {
+                rgb(accent)
+            } else {
+                dim(accent)
+            },
+        }
+    }
+
+    /// Side face of raised bridge decks.
+    pub fn deck_side(&self) -> Color {
+        rgb(mix(self.bridge_casing, 0x000000, 0.2))
     }
 
     pub fn building_outline(&self) -> Color {

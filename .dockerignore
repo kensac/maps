@@ -1,0 +1,17 @@
+# Keep the build context tiny: only Cargo.toml, Cargo.lock and src/ are needed.
+target/
+tiles/
+docs/
+examples/
+scratch/
+.git/
+.github/
+*.osm.pbf
+*.cache
+*.png
+*.jpg
+.DS_Store
+.vscode/
+Dockerfile
+compose.yaml
+.dockerignore

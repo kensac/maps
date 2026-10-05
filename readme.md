@@ -1,147 +1,198 @@
 # maps
 
-A fast, parallel OpenStreetMap renderer written in Rust. Give it an
-`.osm.pbf` extract and it produces print-quality posters or a browsable XYZ
-tile pyramid, entirely offline.
+A fast OpenStreetMap renderer and real-time 3D map server written in Rust.
+Load an `.osm.pbf` extract and it renders every tile on demand: rotated,
+tilted and in 3D. It can also write print-quality posters or a static tile
+pyramid offline.
 
-![New York City, rendered from a 184 MB extract](docs/nyc.jpg)
+![Lower Manhattan at night: true building heights, lit windows, raised FDR Drive](docs/dark.jpg)
 
-| Financial District in 3D, z17 | Midtown in the dark theme |
+| Financial District, z17 | Civic Center: roof shapes, mapped colours, parts |
 | --- | --- |
-| ![Financial District, extruded buildings](docs/fidi.jpg) | ![Midtown, dark theme](docs/dark.jpg) |
+| ![Financial District](docs/fidi.jpg) | ![Civic Center](docs/civic.jpg) |
 
-![JFK airport](docs/jfk.jpg)
+| Brooklyn Bridge: decks on pillars over their shade | New York City, 184 MB extract |
+| --- | --- |
+| ![Brooklyn Bridge](docs/bridge.jpg) | ![New York City](docs/nyc.jpg) |
 
 ## Features
 
-- **Full cartographic style**: about 70 feature kinds covering land use, land cover,
-  water, a road hierarchy with casings, rail, aeroways, piers, barriers,
-  power lines, ferries, administrative boundaries and individual trees. Widths
-  and visibility change with zoom.
-- **Oceans from coastlines.** Coastline ways are stitched into land polygons
-  clipped to the extract, so the sea is actually blue.
-- **Real multipolygons**: rings are assembled from relation members and holes
-  are rendered correctly (courtyards, islands in lakes, lakes on islands).
-- **3D buildings**: from zoom 15, buildings are extruded by their `height` /
-  `building:levels` tags in an oblique view, with facades shaded by
-  orientation and back-to-front painting. `--buildings flat` switches to flat
-  footprints with cast shadows instead.
-- **Two custom themes**: *Daylight* (warm paper, teal water, a single amber
-  highway accent) and *Midnight* (ink-blue land, streets that glow warmer
-  with importance), plus `--scale 2` for high-DPI output.
-- **Tiles or posters**: an XYZ pyramid with a bundled Leaflet viewer, or a
-  single image of any size, streamed to disk in bands so gigapixel posters fit
-  in memory.
-- **Seamless output**: geometry is clipped per tile and dash patterns keep their
-  phase across tile edges.
+**Real-time server**
+- `maps serve` keeps the map in memory and renders tiles on request. It
+  ships with a viewer that pans, zooms, rotates and tilts with mouse, touch
+  and keyboard.
+- Rotation and tilt are served as tiles too, so they stay cacheable,
+  parallel and seamless.
+
+**True 3D, painted in depth order**
+- Buildings and `building:part`s rise from their mapped `min_height` to their
+  `height`, so skyscraper setbacks and floating parts appear where they
+  are mapped. Untagged buildings get typical heights for their type.
+- Roofs follow `roof:shape`: flat, gabled, hipped, pyramidal or cone,
+  skillion, dome or onion. Each roof face is shaded under one sun, and
+  `roof:colour` and `building:colour` are used when mapped.
+- Facades show floors as window bands. At night some windows are lit.
+- Objects mapped on roofs (`location=roof`, such as New York's wooden water
+  tanks) stand on their building.
+- Bridges and viaducts are raised decks on pillars. Walls, hedges, fences
+  and dams are vertical faces. Power lines and aerial tramways hang between
+  pylons. Tree rows become rows of trees. Water lies below the land, so
+  shorelines show banks.
+- Everything with height is painted back to front, so a tall building in
+  front hides the street, overpass or tower behind it. Tunnels are hidden
+  in tilted views.
+
+**Bespoke models for street objects**
+- About 40 kinds of point objects have their own 3D model at real
+  dimensions:
+  - trees (with conifer variants)
+  - lamps, traffic signals with three lamps, stop signs
+  - power poles with crossarms, braced lattice pylons
+  - flagpoles with flags, chimneys, towers
+  - wooden water towers, cranes
+  - hydrants, benches, picnic tables, post boxes, bike racks
+  - bus shelters, phone booths, subway entrances with globe lamps
+  - swing sets, monuments, buffer stops, and more
+
+**Full cartography**
+- About 140 feature kinds, chosen from a census of every tag in the NYC
+  extract (`examples/census.rs`). Only physical things are drawn; names,
+  addresses and routes are not.
+- Golf courses, sport pitches by sport, swimming pools, parking stalls,
+  road-surface areas, piers, platforms and aprons are all covered.
+- Coastlines become land polygons, multipolygons keep their holes, and road
+  casings merge cleanly at junctions.
+- Two themes: *Daylight* and *Midnight*.
 
 ## Usage
 
 ```sh
 cargo build --release
 
-# A 4096 px wide poster of the whole extract
-./target/release/maps render nyc.osm.pbf -o nyc.png
+# Real-time server and viewer: open http://localhost:8080
+./target/release/maps serve nyc.osm.pbf --addr 0.0.0.0:8080 --cache-mb 1024
 
-# A close-up at zoom 17, dark theme, retina resolution
-./target/release/maps render nyc.osm.pbf -o soho.png \
-    --bbox=-74.010,40.718,-73.995,40.728 --zoom 17 --theme dark --scale 2
+# A poster: 45° tilt by default, any bearing, any region
+./target/release/maps render nyc.osm.pbf -o fidi.png \
+    --bbox=-74.017,40.702,-74.006,40.710 --zoom 17 --pitch 50 --bearing 29 --scale 2
 
-# A tile pyramid, then open tiles/index.html in a browser
-./target/release/maps tiles nyc.osm.pbf -o tiles --min-zoom 10 --max-zoom 16
+# Straight down, the whole extract, dark theme
+./target/release/maps render nyc.osm.pbf -o nyc.png --pitch 0 --theme dark
 
-# Feature counts, bounds and tile estimates
+# A static tile pyramid (oblique 3D, Web Mercator aligned) with a Leaflet viewer
+./target/release/maps tiles nyc.osm.pbf -o tiles --min-zoom 10 --max-zoom 17 --scale 2
+
+# Feature counts and bounds
 ./target/release/maps info nyc.osm.pbf
 ```
+
+In the viewer, drag to pan and scroll to zoom. Right-drag or Ctrl+drag
+rotates and tilts. On touch screens, pinch to zoom, twist to rotate and
+swipe two fingers vertically to tilt. The URL hash
+(`#zoom/lat/lon/bearing/pitch`) is shareable.
 
 Extracts for any region are available from
 [BBBike](https://extract.bbbike.org/) or [Geofabrik](https://download.geofabrik.de/).
 
+## Deployment
+
+The binary is self-contained, pure Rust, and has no system dependencies
+beyond libc. A multi-stage Dockerfile builds a 53 MB distroless image that
+runs as non-root:
+
+```sh
+docker build -t maps .
+docker run -p 8080:8080 -v $PWD/nyc.osm.pbf:/data/map.osm.pbf:ro maps
+# or: MAP=./nyc.osm.pbf docker compose up --build
+```
+
+Endpoints:
+
+| Path | Purpose |
+| --- | --- |
+| `/` | The viewer |
+| `/meta.json` | Bounds, styles, data version |
+| `/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{y}[@2x].png` | Tiles. Immutable and cacheable forever, because `version` changes with the data. |
+| `/health` | Liveness probe (`ok`) |
+| `/metrics` | Prometheus counters: requests, cache hits, renders, render time, cache size |
+
+The server shuts down gracefully on SIGTERM.
+
 ## Performance
 
-Measured on an Apple M1 Pro (10 cores), release build:
+Measured on an Apple M1 Pro (10 cores), release build.
 
-| Extract | PBF size | Features | Vertices | Ingest |
-| --- | ---: | ---: | ---: | ---: |
-| JFK airport | 2.3 MB | 52 k | 0.3 M | 0.04 s |
-| Manhattan + Brooklyn | 16 MB | 297 k | 1.9 M | 0.2 s |
-| New York metro | 184 MB | 3.5 M | 24.8 M | 3.4 s |
+| Extract | PBF | Features | Load |
+| --- | ---: | ---: | ---: |
+| JFK airport | 2.3 MB | 59 k | 0.12 s |
+| Manhattan + Brooklyn | 16 MB | 361 k | 0.34 s |
+| New York metro | 184 MB | 3.9 M | 4.5 s, then 1.7 GB resident |
 
-On the New York metro extract:
+Serving the NYC extract (Midtown, 512 px retina tiles at bearing 29° and
+pitch 45°, 16 concurrent clients):
 
-| Task | Time |
-| --- | ---: |
-| 4096 px poster, end to end (including ingest) | 3.7 s |
-| 12000 × 9311 px (112 Mpx) poster, after ingest | 2.8 s |
-| 48,249 tiles, z10–z16 | 20.5 s (≈2,350 tiles/s; 3,050/s at z16) |
+| | Average latency | Max |
+| --- | ---: | ---: |
+| Uncached tile (rendered on demand, about 16 ms CPU) | 18 ms | 99 ms |
+| Cached tile | 0.5 ms | 3 ms |
 
-The previous version of this project took 17 s end to end for a single
-4096 px image of the same extract. Its parse alone took 10.9 s against 3.4 s
-here, and it drew only unstyled lines and polygons in a stretched projection.
+A tilted 8000 px poster of the whole metro area renders in about 3 s after loading.
+The previous version of this project took 17 s for a single unstyled 4096 px
+image.
 
 ## How it works
 
 ```
-.osm.pbf ─► ingest ─► map ─────────────► render ─► output
-            3 passes   assemble rings     per viewport:  tiles / poster
-            in parallel coastline → land   query index
-                       orient, sort       batch, clip, rasterize
+.osm.pbf ─► ingest ─► map ─────────────────► render ─► server / tiles / poster
+            3 passes   rings, coastlines,      ground layers, then a
+            in parallel parts, roofs placed,   depth-sorted 3D scene
                        R-tree per zoom
 ```
 
 **Ingest** (`src/ingest.rs`) reads the PBF in three parallel passes over its
-compressed blobs, instead of holding every node in memory:
-1. Relations. Find multipolygons and boundaries and the ways they use, and
-   record which blobs contain ways and which contain nodes.
-2. Ways. Keep renderable ways, coastlines and relation members as node ID
-   lists. Node blobs are skipped without being decompressed.
-3. Nodes. Resolve coordinates only for the referenced node IDs, plus tagged
-   trees, by walking a cursor through a sorted ID list. Way blobs are skipped.
+compressed blobs:
+1. Relations.
+2. Ways, skipping node blobs undecompressed.
+3. Only the referenced nodes, plus tagged objects, skipping way blobs.
 
-**Map building** (`src/map.rs`, `src/assemble.rs`) runs in parallel chunks:
-- Multipolygon members are stitched into rings by matching endpoints.
-- Rings are oriented by nesting depth (outers positive, holes negative). After
-  that, one non-zero fill renders any polygon, and any union of polygons drawn
-  as a single path, correctly.
-- Coastlines are joined head to tail and clipped to the extract. The land
-  polygons come from walking the boundary counter-clockwise from each exit
-  point to the next entry point; this works because land is always on the
-  left of a coastline.
-- Geometry is stored as `f32` offsets from the extract origin in flat arenas.
-- Features are pre-sorted into draw order. Each one gets a visibility zoom: its
-  kind's minimum zoom, or the zoom at which it grows past one pixel, whichever
-  is later.
-- Features are indexed in one R-tree per visibility zoom, so a low-zoom query
-  never touches millions of buildings.
+It classifies tags into physical kinds with real or typical dimensions
+(`src/classify.rs`).
 
-**Rendering** (`src/render.rs`, `src/style.rs`) works per viewport:
-- Query the index, then walk features in runs that share a draw group and
-  layer. Road casings for a whole layer are drawn before any road fills, so
-  junctions merge cleanly.
-- Features with identical style are batched into a single path.
-- Vertices are projected, simplified to a 0.3 px tolerance, and clipped with
-  Sutherland–Hodgman (polygons) or Liang–Barsky (lines) before reaching the
-  [tiny-skia](https://github.com/linebender/tiny-skia) rasterizer.
-- 3D buildings are painted back to front, sorted by their southern edge in
-  one global order, so neighbouring tiles agree. Each building is a roof
-  (the footprint lifted up the screen) plus the walls swept by its
-  viewer-facing edges; together they cover the footprint, so it needs no
-  fill of its own. Queries extend below the viewport so towers south of a
-  tile still rise into it.
-- Flat-mode shadows are the footprint swept along the light direction. Only
-  the quads of edges facing away from the light are needed, and they share a
-  winding, so overlapping shadows union instead of stacking.
+**Map building** (`src/map.rs`, `src/assemble.rs`):
+- Assembles multipolygon rings and orients them for non-zero filling.
+- Turns coastlines into land.
+- Drops building outlines that are drawn through their parts, and lifts
+  rooftop objects onto their buildings.
+- Sorts features into draw order and indexes them in one R-tree per zoom
+  bucket.
 
-**Output** (`src/output.rs`) renders tiles on all cores. Posters are rendered
-in parallel bands while a dedicated thread streams PNG encoding, so encoding
-overlaps with rendering.
+**Rendering** (`src/render/`) uses an orthographic camera with bearing and
+pitch. The ground is foreshortened by cos(pitch) and heights rise by
+sin(pitch); because that map is affine, any rotated, tilted view is still a
+regular tile grid.
+- Ground layers are projected, simplified, clipped and rasterized with
+  tiny-skia.
+- Everything with height goes into a scene (`scene.rs`) and is painted back
+  to front. That includes solids with real roof geometry (`solids.rs`),
+  bespoke object models (`models.rs`, on a small 3D mesh rasterizer in
+  `mesh.rs`) and raised line chunks (`lines.rs`).
+- The paint order is a pure function of geometry and camera, so tiles agree
+  at their edges.
+
+**Serving** (`src/server.rs`):
+- Tokio and axum handle HTTP; rendering runs on the rayon CPU pool.
+- A size-bounded moka cache coalesces concurrent requests for the same tile.
+- Renders whose clients have gone are skipped, and a semaphore bounds
+  in-flight work.
+- Render buffers are reused per thread.
 
 ## Development
 
 ```sh
-cargo test       # geometry, assembly, coastline and style unit tests
-cargo clippy --all-targets
+cargo test
+cargo clippy --all-targets -- -D warnings
 cargo fmt
+cargo run --release --example census -- nyc.osm.pbf   # tag census of an extract
 ```
 
 ## Data

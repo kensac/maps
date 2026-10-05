@@ -14,7 +14,7 @@
 //!
 //! Each pass decodes blobs on all cores.
 
-use crate::classify::{boundary_level, node_kind, way_kind, Kind, Tags};
+use crate::classify::{boundary_level, node_kind, way_kind, Detail, Kind, Tags};
 use crate::geo::{project, Point, Rect};
 use anyhow::{Context, Result};
 use osmpbf::{BlobDecode, BlobReader, BlobType, PrimitiveBlock, RelMemberType};
@@ -30,8 +30,37 @@ pub struct RawWay {
     pub kind: Kind,
     pub flags: u8,
     pub layer: i8,
+    /// Top above the ground in meters (tagged, or typical for the kind).
     pub height: f32,
+    /// Bottom above the ground in meters (`min_height`).
+    pub base: f32,
+    /// Roof and facade detail, for extruded solids.
+    pub detail: Option<Detail>,
     pub refs: Vec<i64>,
+}
+
+/// A physical object mapped as a single node.
+#[derive(Clone, Copy)]
+pub struct RawPoint {
+    pub kind: Kind,
+    pub flags: u8,
+    pub height: f32,
+    pub at: Point,
+}
+
+/// Height and base of a feature from its tags, falling back to typical
+/// dimensions for its kind.
+fn dimensions(kind: Kind, tags: &Tags) -> (f32, f32) {
+    let height = tags.height().unwrap_or_else(|| {
+        let typical = kind.default_height(tags);
+        // Rooftop tanks and towers are much smaller than freestanding ones.
+        if tags.flags() & crate::classify::flags::ON_ROOF != 0 {
+            typical.min(6.0)
+        } else {
+            typical
+        }
+    });
+    (height, tags.min_height().min(height))
 }
 
 /// A multipolygon relation: an area made of several member ways.
@@ -41,6 +70,8 @@ pub struct RawMultipolygon {
     pub flags: u8,
     pub layer: i8,
     pub height: f32,
+    pub base: f32,
+    pub detail: Option<Detail>,
     pub members: Vec<i64>,
 }
 
@@ -61,7 +92,7 @@ pub struct RawData {
     /// Ways of administrative boundaries, with the lowest admin level using them.
     pub boundary_ways: FxHashMap<i64, u8>,
     pub coastlines: Vec<Vec<i64>>,
-    pub points: Vec<(Kind, Point)>,
+    pub points: Vec<RawPoint>,
 }
 
 impl RawData {
@@ -150,7 +181,7 @@ struct WayPass {
 #[derive(Default)]
 struct NodePass {
     hits: Vec<(u32, Point)>,
-    points: Vec<(Kind, Point)>,
+    points: Vec<RawPoint>,
     bbox: Option<Rect>,
 }
 
@@ -177,12 +208,15 @@ pub fn read(path: &Path) -> Result<RawData> {
                     match tags.kind {
                         Some("multipolygon") => {
                             if let Some(kind) = crate::classify::area_kind(&tags) {
+                                let (height, base) = dimensions(kind, &tags);
                                 acc.multipolygons.push(RawMultipolygon {
                                     id: r.id(),
                                     kind,
                                     flags: tags.flags(),
                                     layer: tags.layer(),
-                                    height: tags.height().unwrap_or(0.0),
+                                    height,
+                                    base,
+                                    detail: kind.is_extrusion().then(|| tags.detail()),
                                     members: ways().collect(),
                                 });
                             }
@@ -259,12 +293,15 @@ pub fn read(path: &Path) -> Result<RawData> {
                         acc.members.insert(w.id(), refs.clone());
                     }
                     if let Some(kind) = kind {
+                        let (height, base) = dimensions(kind, &tags);
                         acc.ways.push(RawWay {
                             id: w.id(),
                             kind,
                             flags: tags.flags(),
                             layer: tags.layer(),
-                            height: tags.height().unwrap_or(0.0),
+                            height,
+                            base,
+                            detail: kind.is_extrusion().then(|| tags.detail()),
                             refs,
                         });
                     }
@@ -316,7 +353,7 @@ pub fn read(path: &Path) -> Result<RawData> {
             let mut cursor: Option<usize> = None;
             let mut last_id = i64::MIN;
             let mut bbox = acc.bbox.unwrap_or(Rect::EMPTY);
-            let mut visit = |id: i64, lon: f64, lat: f64, tagged: Option<Kind>| {
+            let mut visit = |id: i64, lon: f64, lat: f64, tagged: Option<(Kind, u8, f32)>| {
                 let c = match cursor {
                     Some(mut c) if id >= last_id => {
                         while c < ids.len() && ids[c] < id {
@@ -333,21 +370,28 @@ pub fn read(path: &Path) -> Result<RawData> {
                 if c < ids.len() && ids[c] == id {
                     acc.hits.push((c as u32, p));
                 }
-                if let Some(kind) = tagged {
-                    acc.points.push((kind, p));
+                if let Some((kind, flags, height)) = tagged {
+                    acc.points.push(RawPoint {
+                        kind,
+                        flags,
+                        height,
+                        at: p,
+                    });
                 }
             };
+            let object =
+                |tags: Tags| node_kind(&tags).map(|k| (k, tags.flags(), dimensions(k, &tags).0));
             for group in block.groups() {
                 for n in group.dense_nodes() {
                     let tagged = if n.raw_tags().len() > 0 {
-                        node_kind(&Tags::parse(n.tags()))
+                        object(Tags::parse(n.tags()))
                     } else {
                         None
                     };
                     visit(n.id(), n.lon(), n.lat(), tagged);
                 }
                 for n in group.nodes() {
-                    visit(n.id(), n.lon(), n.lat(), node_kind(&Tags::parse(n.tags())));
+                    visit(n.id(), n.lon(), n.lat(), object(Tags::parse(n.tags())));
                 }
             }
             acc.bbox = Some(bbox);
@@ -379,7 +423,11 @@ pub fn read(path: &Path) -> Result<RawData> {
     ways_out.par_sort_unstable_by_key(|w| w.id);
     multipolygons.par_sort_unstable_by_key(|m| m.id);
     coastlines.sort_unstable_by_key(|c| c[0]);
-    points.par_sort_unstable_by(|a, b| a.1[0].total_cmp(&b.1[0]).then(a.1[1].total_cmp(&b.1[1])));
+    points.par_sort_unstable_by(|a, b| {
+        (a.at[0].total_cmp(&b.at[0]))
+            .then(a.at[1].total_cmp(&b.at[1]))
+            .then(a.kind.cmp(&b.kind))
+    });
 
     Ok(RawData {
         header_bbox,

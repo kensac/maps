@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>maps</title>
+<style>
+  :root {
+    --bg: #e9e5dc; --panel: rgba(255,255,255,.82); --ink: #2b2a28; --muted: #8a857c;
+    --line: rgba(0,0,0,.08); --accent: #e0a24a; --shadow: 0 6px 24px rgba(40,30,20,.14);
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151b; --panel: rgba(28,32,40,.82); --ink: #e6e3dc; --muted: #8b93a3;
+    --line: rgba(255,255,255,.08); --accent: #f0a65e; --shadow: 0 6px 24px rgba(0,0,0,.45);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg);
+    font: 13px/1.3 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink); -webkit-user-select: none; user-select: none; }
+  #map { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
+  #map.dragging { cursor: grabbing; }
+  .layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+  .layer img { position: absolute; width: 257px; height: 257px; opacity: 0;
+    transition: opacity .18s ease-out; pointer-events: none; image-rendering: auto; }
+  .layer img.loaded { opacity: 1; }
+  .panel { position: absolute; background: var(--panel); backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: var(--shadow); }
+  .controls { right: 16px; bottom: 28px; display: flex; flex-direction: column; overflow: hidden; }
+  .controls button, .seg button { appearance: none; border: 0; background: transparent; color: var(--ink);
+    font: inherit; cursor: pointer; }
+  .controls button { width: 40px; height: 40px; font-size: 20px; display: grid; place-items: center; }
+  .controls button + button { border-top: 1px solid var(--line); }
+  .controls button:hover, .seg button:hover { background: var(--line); }
+  #compass svg { width: 24px; height: 24px; transition: transform .05s linear; }
+  .top { position: absolute; top: 16px; right: 16px; display: flex; gap: 8px; }
+  .seg { display: flex; padding: 3px; gap: 2px; }
+  .seg button { padding: 6px 12px; border-radius: 9px; font-weight: 500; color: var(--muted); }
+  .seg button.on { background: var(--ink); color: var(--bg); }
+  .hud { left: 16px; bottom: 28px; padding: 8px 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .hud b { color: var(--ink); font-weight: 600; }
+  .attr { position: absolute; right: 8px; bottom: 6px; font-size: 11px; color: var(--muted); }
+  .attr a { color: inherit; }
+  .help { left: 16px; top: 16px; padding: 10px 12px; color: var(--muted); max-width: 260px; font-size: 12px; }
+  .help b { color: var(--ink); }
+  #progress { position: absolute; left: 0; top: 0; height: 2px; background: var(--accent);
+    width: 0; opacity: 0; transition: width .2s, opacity .3s; }
+  @media (max-width: 600px) { .help { display: none; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="progress"></div>
+<div class="panel help"><b>Drag</b> to pan · <b>scroll</b> to zoom<br>
+  <b>Right-drag</b> or <b>Ctrl+drag</b> to rotate &amp; tilt<br>
+  Touch: pinch, twist, two-finger vertical swipe to tilt</div>
+<div class="top">
+  <div class="panel seg" id="theme"><button data-v="light" class="on">Day</button><button data-v="dark">Night</button></div>
+  <div class="panel seg" id="mode"><button data-v="3d" class="on">3D</button><button data-v="flat">Flat</button></div>
+</div>
+<div class="panel controls">
+  <button id="zin" title="Zoom in">+</button>
+  <button id="zout" title="Zoom out">−</button>
+  <button id="compass" title="Reset north and tilt">
+    <svg viewBox="0 0 24 24"><path d="M12 2l4 10h-8z" fill="#e0604a"/><path d="M12 22l-4-10h8z" fill="currentColor" opacity=".45"/></svg>
+  </button>
+  <button id="tilt" title="Toggle tilt" style="font-size:12px;font-weight:600">3D</button>
+</div>
+<div class="panel hud" id="hud"></div>
+<div class="attr">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
+<script>
+"use strict";
+(async () => {
+const meta = await (await fetch("meta.json")).json();
+const T = 256, MAXZ = meta.maxZoom, MAXP = meta.maxPitch;
+const DPR = Math.min(meta.maxScale, Math.max(1, Math.round(window.devicePixelRatio || 1)));
+const $ = (s) => document.querySelector(s);
+const mapEl = $("#map");
+const rad = (d) => d * Math.PI / 180;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// Web Mercator, normalized to [0, 1] with y pointing south (as on the server).
+const project = (lon, lat) => {
+  const s = Math.sin(rad(clamp(lat, -85.05, 85.05)));
+  return [(lon + 180) / 360, 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)];
+};
+const unproject = (x, y) => [x * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI];
+const [bx0, by0] = project(meta.bounds[0], meta.bounds[3]);
+const [bx1, by1] = project(meta.bounds[2], meta.bounds[1]);
+
+// Camera state. bearing: compass direction at the top; pitch: degrees off vertical.
+const view = { x: 0, y: 0, z: 12, bearing: 0, pitch: 45 };
+const style = { theme: "light", flat: false };
+let W = innerWidth, H = innerHeight;
+
+function fitZoom() {
+  return Math.log2(Math.min(W / ((bx1 - bx0) * T), H / ((by1 - by0) * T)));
+}
+function readHash() {
+  const p = location.hash.slice(1).split("/").map(Number);
+  if (p.length >= 3 && p.every(Number.isFinite)) {
+    [view.x, view.y] = project(p[2], p[1]);
+    view.z = p[0]; view.bearing = p[3] || 0; view.pitch = p.length > 4 ? p[4] : 45;
+    return true;
+  }
+  return false;
+}
+if (!readHash()) { view.x = (bx0 + bx1) / 2; view.y = (by0 + by1) / 2; view.z = fitZoom() + 0.3; }
+const minZoom = () => Math.max(1, fitZoom() - 1.5);
+
+// The screen-plane transform used by the server: rotate by bearing, then
+// foreshorten the ground by cos(pitch).
+function forward(b, p, x, y) {
+  const c = Math.cos(rad(b)), s = Math.sin(rad(b));
+  return [c * x + s * y, (-s * x + c * y) * Math.cos(rad(p))];
+}
+function inverse(b, p, x, y) {
+  const c = Math.cos(rad(b)), s = Math.sin(rad(b));
+  y /= Math.cos(rad(p));
+  return [c * x - s * y, s * x + c * y];
+}
+
+// ---- Tile layers --------------------------------------------------------
+// Each layer is one (style, bearing, pitch, zoom) tile grid. The live camera
+// may differ slightly from the layer's settled bearing/pitch/zoom while
+// gesturing; an exact affine CSS matrix covers the difference for the ground.
+const layers = [];
+let active = null;
+let settled = { bearing: 0, pitch: 45 }, settleTimer = 0;
+
+function styleKey() { return style.theme + (style.flat ? "-flat" : ""); }
+function wantedKey() {
+  const tz = clamp(Math.round(view.z), 0, MAXZ);
+  return { style: styleKey(), tb: ((Math.round(settled.bearing) % 360) + 360) % 360,
+           tp: clamp(Math.round(settled.pitch / 5) * 5, 0, MAXP), tz };
+}
+function makeLayer(k) {
+  const el = document.createElement("div");
+  el.className = "layer";
+  mapEl.appendChild(el);
+  const world = T * 2 ** k.tz;
+  const c = forward(k.tb, k.tp, view.x * world, view.y * world);
+  const L = { ...k, el, tiles: new Map(), pending: 0,
+    ax: Math.floor(c[0] / T), ay: Math.floor(c[1] / T),
+    key: `${k.style}/${k.tb}/${k.tp}/${k.tz}` };
+  layers.push(L);
+  return L;
+}
+// Affine map from layer tile-plane coordinates (relative to its anchor tile)
+// to screen pixels.
+function layerMatrix(L) {
+  const world = T * 2 ** L.tz, sz = 2 ** (view.z - L.tz);
+  const d = rad(view.bearing - L.tb), cd = Math.cos(d), sd = Math.sin(d);
+  const cp = Math.cos(rad(view.pitch)), ctp = Math.cos(rad(L.tp));
+  const a = sz * cd, c = sz * sd / ctp, b = -sz * sd * cp, dd = sz * cd * cp / ctp;
+  const P = forward(L.tb, L.tp, view.x * world, view.y * world);
+  const px = P[0] - L.ax * T, py = P[1] - L.ay * T;
+  return { a, b, c, d: dd, e: W / 2 - (a * px + c * py), f: H / 2 - (b * px + dd * py) };
+}
+function tileUrl(L, x, y) {
+  const s = DPR > 1 ? `@${DPR}x` : "";
+  return `tiles/${meta.version}/${L.style}/${L.tb}/${L.tp}/${L.tz}/${x}/${y}${s}.png`;
+}
+function updateLayer(L, fetch) {
+  const m = layerMatrix(L);
+  L.el.style.transform = `matrix(${m.a},${m.b},${m.c},${m.d},${m.e},${m.f})`;
+  if (!fetch) return;
+  // Screen corners back into the tile plane → which tiles are visible.
+  const det = m.a * m.d - m.b * m.c;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [sx, sy] of [[0, 0], [W, 0], [W, H], [0, H]]) {
+    const u = sx - m.e, v = sy - m.f;
+    const qx = (m.d * u - m.c * v) / det, qy = (-m.b * u + m.a * v) / det;
+    x0 = Math.min(x0, qx); x1 = Math.max(x1, qx); y0 = Math.min(y0, qy); y1 = Math.max(y1, qy);
+  }
+  const tx0 = Math.floor(x0 / T) - 1, tx1 = Math.floor(x1 / T) + 1;
+  // Tall buildings south of the view rise into it: fetch a little further down.
+  const ty0 = Math.floor(y0 / T) - 1, ty1 = Math.floor(y1 / T) + 2;
+  const keep = new Set();
+  const order = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+    const k = `${tx},${ty}`; keep.add(k);
+    if (!L.tiles.has(k)) order.push([tx, ty]);
+  }
+  // Load from the center outwards.
+  const cx = (x0 + x1) / 2 / T, cy = (y0 + y1) / 2 / T;
+  order.sort((p, q) => Math.hypot(p[0] - cx, p[1] - cy) - Math.hypot(q[0] - cx, q[1] - cy));
+  for (const [tx, ty] of order) {
+    const img = new Image();
+    img.decoding = "async";
+    img.style.left = tx * T + "px"; img.style.top = ty * T + "px";
+    L.pending++;
+    const done = () => { L.pending--; progress(); if (L === active) maybeDropFallbacks(); };
+    img.onload = () => { img.classList.add("loaded"); done(); };
+    img.onerror = () => {
+      img.remove(); L.tiles.delete(`${tx},${ty}`); done();
+      setTimeout(request, 500); // the next frame re-requests it
+    };
+    img.src = tileUrl(L, L.ax + tx, L.ay + ty);
+    L.el.appendChild(img);
+    L.tiles.set(`${tx},${ty}`, img);
+  }
+  for (const [k, img] of L.tiles) if (!keep.has(k)) { img.src = ""; img.remove(); L.tiles.delete(k); }
+  progress();
+}
+function maybeDropFallbacks() {
+  if (active.pending > 0) return;
+  for (const L of layers.slice()) if (L !== active) dropLayer(L);
+}
+function dropLayer(L) {
+  for (const img of L.tiles.values()) img.src = "";
+  L.el.remove();
+  layers.splice(layers.indexOf(L), 1);
+}
+function progress() {
+  const pending = layers.reduce((n, L) => n + L.pending, 0);
+  const total = active ? active.tiles.size : 1;
+  const bar = $("#progress");
+  bar.style.opacity = pending ? 1 : 0;
+  bar.style.width = (pending ? 100 * (1 - pending / Math.max(total, pending)) : 100) + "%";
+}
+
+// ---- Frame loop ---------------------------------------------------------
+let dirty = true;
+const request = () => { dirty = true; };
+function frame() {
+  if (dirty) {
+    dirty = false;
+    view.z = clamp(view.z, minZoom(), MAXZ + 2);
+    view.pitch = clamp(view.pitch, 0, MAXP);
+    view.bearing = ((view.bearing % 360) + 360) % 360;
+    view.x = clamp(view.x, bx0, bx1); view.y = clamp(view.y, by0, by1);
+    const k = wantedKey();
+    const key = `${k.style}/${k.tb}/${k.tp}/${k.tz}`;
+    if (!active || active.key !== key) {
+      const existing = layers.find((L) => L.key === key);
+      active = existing || makeLayer(k);
+      mapEl.appendChild(active.el); // on top
+      while (layers.length > 3) dropLayer(layers.find((L) => L !== active));
+    }
+    for (const L of layers) updateLayer(L, L === active);
+    hud();
+    saveHash();
+  }
+  requestAnimationFrame(frame);
+}
+function hud() {
+  const tilt = view.pitch < 0.5 ? "top-down" : `${view.pitch.toFixed(0)}° tilt`;
+  $("#hud").innerHTML = `<b>z ${view.z.toFixed(1)}</b> · ${view.bearing.toFixed(0)}° · ${tilt}`;
+  $("#compass svg").style.transform =
+    `perspective(60px) rotateX(${view.pitch * 0.8}deg) rotate(${-view.bearing}deg)`;
+}
+let hashTimer = 0;
+function saveHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    const [lon, lat] = unproject(view.x, view.y);
+    history.replaceState(null, "", `#${view.z.toFixed(2)}/${lat.toFixed(5)}/${lon.toFixed(5)}/` +
+      `${view.bearing.toFixed(1)}/${view.pitch.toFixed(0)}`);
+  }, 250);
+}
+// Rotation and tilt render new tile grids; wait until the camera rests.
+function changedOrientation() {
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => {
+    settled = { bearing: view.bearing, pitch: view.pitch };
+    request();
+  }, 140);
+}
+
+// ---- Camera math --------------------------------------------------------
+function screenToWorld(sx, sy, z = view.z) {
+  const [wx, wy] = inverse(view.bearing, view.pitch, sx - W / 2, sy - H / 2);
+  const world = T * 2 ** z;
+  return [view.x + wx / world, view.y + wy / world];
+}
+function panBy(dx, dy) {
+  const [wx, wy] = inverse(view.bearing, view.pitch, dx, dy);
+  const world = T * 2 ** view.z;
+  view.x -= wx / world; view.y -= wy / world;
+  request();
+}
+function zoomAround(sx, sy, dz) {
+  const before = screenToWorld(sx, sy);
+  view.z = clamp(view.z + dz, minZoom(), MAXZ + 2);
+  const after = screenToWorld(sx, sy);
+  view.x += before[0] - after[0]; view.y += before[1] - after[1];
+  request();
+}
+function rotateBy(db, dp) {
+  view.bearing += db;
+  view.pitch = clamp(view.pitch + dp, 0, MAXP);
+  changedOrientation();
+  request();
+}
+let anim = 0;
+function animateTo(target, ms = 350) {
+  cancelAnimationFrame(anim);
+  const from = { ...view }, t0 = performance.now();
+  let db = ((target.bearing ?? from.bearing) - from.bearing) % 360;
+  if (db > 180) db -= 360; if (db < -180) db += 360;
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - k, 3);
+    view.z = from.z + ((target.z ?? from.z) - from.z) * e;
+    view.bearing = from.bearing + db * e;
+    view.pitch = from.pitch + ((target.pitch ?? from.pitch) - from.pitch) * e;
+    request();
+    if (k < 1) anim = requestAnimationFrame(step); else changedOrientation();
+  };
+  anim = requestAnimationFrame(step);
+}
+
+// ---- Input --------------------------------------------------------------
+const pointers = new Map();
+let gesture = null, velocity = [0, 0], lastMove = 0, inertia = 0;
+mapEl.addEventListener("contextmenu", (e) => e.preventDefault());
+mapEl.addEventListener("pointerdown", (e) => {
+  mapEl.setPointerCapture(e.pointerId);
+  cancelAnimationFrame(inertia); cancelAnimationFrame(anim);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const orbit = e.button === 2 || e.ctrlKey || e.metaKey;
+  gesture = pointers.size === 1 ? (orbit ? "orbit" : "pan") : "multi";
+  gesture2 = null;
+  mapEl.classList.add("dragging");
+});
+let gesture2 = null;
+mapEl.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  if (gesture === "multi" && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const before = { d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x),
+                     my: (a.y + b.y) / 2, mx: (a.x + b.x) / 2 };
+    p.x = e.clientX; p.y = e.clientY;
+    const [a2, b2] = [...pointers.values()];
+    const after = { d: Math.hypot(b2.x - a2.x, b2.y - a2.y), ang: Math.atan2(b2.y - a2.y, b2.x - a2.x),
+                    my: (a2.y + b2.y) / 2, mx: (a2.x + b2.x) / 2 };
+    if (!gesture2) {
+      const vertical = Math.abs(after.my - before.my) > 2 * Math.abs(after.d - before.d) &&
+                       Math.abs(after.my - before.my) > 1.5;
+      gesture2 = vertical ? "tilt" : "pinch";
+    }
+    if (gesture2 === "tilt") {
+      rotateBy(0, -(after.my - before.my) * 0.35);
+    } else {
+      zoomAround(after.mx, after.my, Math.log2(after.d / before.d));
+      let da = (after.ang - before.ang) * 180 / Math.PI;
+      if (da > 180) da -= 360; if (da < -180) da += 360;
+      rotateBy(-da, 0);
+      panBy(after.mx - before.mx, after.my - before.my);
+    }
+    return;
+  }
+  p.x = e.clientX; p.y = e.clientY;
+  if (gesture === "pan") {
+    panBy(dx, dy);
+    const now = performance.now(), dt = Math.max(1, now - lastMove);
+    velocity = [dx / dt, dy / dt]; lastMove = now;
+  } else if (gesture === "orbit") {
+    rotateBy(dx * 0.4, -dy * 0.35);
+  }
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0) {
+    mapEl.classList.remove("dragging");
+    if (gesture === "pan" && performance.now() - lastMove < 60) glide();
+    gesture = null;
+  } else if (pointers.size === 1) {
+    gesture = "pan"; gesture2 = null;
+  }
+}
+mapEl.addEventListener("pointerup", endPointer);
+mapEl.addEventListener("pointercancel", endPointer);
+function glide() {
+  let [vx, vy] = velocity, t = performance.now();
+  const step = (now) => {
+    const dt = now - t; t = now;
+    panBy(vx * dt, vy * dt);
+    vx *= Math.pow(0.994, dt); vy *= Math.pow(0.994, dt);
+    if (Math.hypot(vx, vy) > 0.02) inertia = requestAnimationFrame(step);
+  };
+  inertia = requestAnimationFrame(step);
+}
+mapEl.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? H : 1;
+  const k = e.ctrlKey ? 0.012 : 0.0022; // trackpad pinch arrives as ctrl+wheel
+  zoomAround(e.clientX, e.clientY, clamp(-e.deltaY * unit * k, -1, 1));
+}, { passive: false });
+mapEl.addEventListener("dblclick", (e) => {
+  const before = screenToWorld(e.clientX, e.clientY);
+  const z = view.z + (e.shiftKey ? -1 : 1);
+  const after = screenToWorld(e.clientX, e.clientY, z);
+  const from = { x: view.x, y: view.y }, dx = before[0] - after[0], dy = before[1] - after[1];
+  const t0 = performance.now(), z0 = view.z;
+  cancelAnimationFrame(anim);
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / 300), e2 = 1 - Math.pow(1 - k, 3);
+    view.z = z0 + (z - z0) * e2; view.x = from.x + dx * e2; view.y = from.y + dy * e2;
+    request(); if (k < 1) anim = requestAnimationFrame(step);
+  };
+  anim = requestAnimationFrame(step);
+});
+addEventListener("keydown", (e) => {
+  const s = e.shiftKey;
+  const keys = {
+    ArrowLeft: () => s ? rotateBy(-15, 0) : panBy(120, 0),
+    ArrowRight: () => s ? rotateBy(15, 0) : panBy(-120, 0),
+    ArrowUp: () => s ? rotateBy(0, 10) : panBy(0, 120),
+    ArrowDown: () => s ? rotateBy(0, -10) : panBy(0, -120),
+    "+": () => animateTo({ z: Math.round(view.z) + 1 }), "=": () => animateTo({ z: Math.round(view.z) + 1 }),
+    "-": () => animateTo({ z: Math.round(view.z) - 1 }),
+    q: () => rotateBy(-15, 0), e: () => rotateBy(15, 0), n: () => animateTo({ bearing: 0 }),
+  };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+});
+addEventListener("resize", () => { W = innerWidth; H = innerHeight; request(); });
+addEventListener("hashchange", () => { if (readHash()) { settled = { ...view }; request(); } });
+
+$("#zin").onclick = () => animateTo({ z: Math.round(view.z) + 1 });
+$("#zout").onclick = () => animateTo({ z: Math.round(view.z) - 1 });
+$("#compass").onclick = () => animateTo({ bearing: 0, pitch: 0 });
+$("#tilt").onclick = () => animateTo({ pitch: view.pitch > 10 ? 0 : 50 });
+function segmented(id, apply) {
+  for (const b of document.querySelectorAll(`#${id} button`)) b.onclick = () => {
+    for (const o of document.querySelectorAll(`#${id} button`)) o.classList.toggle("on", o === b);
+    apply(b.dataset.v); request();
+  };
+}
+segmented("theme", (v) => { style.theme = v; document.documentElement.dataset.theme = v; });
+segmented("mode", (v) => { style.flat = v === "flat"; });
+
+settled = { bearing: view.bearing, pitch: view.pitch };
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

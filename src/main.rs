@@ -34,6 +34,12 @@ enum Command {
         /// Region to render as west,south,east,north in degrees.
         #[arg(long, value_parser = parse_bbox, allow_hyphen_values = true)]
         bbox: Option<Rect>,
+        /// Compass bearing at the top of the image, in degrees clockwise.
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        bearing: f64,
+        /// Camera angle from straight down, 0–60 degrees.
+        #[arg(long, default_value_t = 45.0)]
+        pitch: f64,
     },
     /// Render an XYZ tile pyramid with an index.html viewer.
     Tiles {
@@ -46,6 +52,17 @@ enum Command {
         min_zoom: u8,
         #[arg(long, default_value_t = 16)]
         max_zoom: u8,
+    },
+    /// Serve the map over HTTP, rendering tiles in real time.
+    Serve {
+        /// Input .osm.pbf file.
+        input: PathBuf,
+        /// Address to listen on.
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        addr: std::net::SocketAddr,
+        /// In-memory tile cache budget, in MiB.
+        #[arg(long, default_value_t = 1024)]
+        cache_mb: u64,
     },
     /// Print statistics about an extract.
     Info {
@@ -80,6 +97,18 @@ fn parse_bbox(s: &str) -> Result<Rect, String> {
     }
 }
 
+/// A short token that changes whenever the input file or this build does,
+/// so tile URLs can be cached forever.
+fn data_version(path: &Path) -> Result<String> {
+    use std::hash::{Hash, Hasher};
+    let meta = std::fs::metadata(path)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    meta.len().hash(&mut h);
+    meta.modified().ok().hash(&mut h);
+    env!("CARGO_PKG_VERSION").hash(&mut h);
+    Ok(format!("{:012x}", h.finish() & 0xffff_ffff_ffff))
+}
+
 fn load(path: &Path) -> Result<Map> {
     if !path.exists() {
         bail!("{} does not exist", path.display());
@@ -104,6 +133,8 @@ fn main() -> Result<()> {
             width,
             zoom,
             bbox,
+            bearing,
+            pitch,
         } => {
             let map = load(&common.input)?;
             let region = match bbox {
@@ -115,7 +146,15 @@ fn main() -> Result<()> {
             }
             let size = zoom.map_or(PosterSize::Width(width), PosterSize::Zoom);
             let renderer = Renderer::new(&map, common.theme.theme(), common.buildings);
-            write_poster(&renderer, region, size, common.scale, &output)
+            write_poster(
+                &renderer,
+                region,
+                size,
+                common.scale,
+                bearing,
+                pitch.clamp(0.0, maps::render::MAX_PITCH),
+                &output,
+            )
         }
         Command::Tiles {
             common,
@@ -126,6 +165,22 @@ fn main() -> Result<()> {
             let map = load(&common.input)?;
             let renderer = Renderer::new(&map, common.theme.theme(), common.buildings);
             write_tiles(&renderer, &map, &output, min_zoom, max_zoom, common.scale)
+        }
+        Command::Serve {
+            input,
+            addr,
+            cache_mb,
+        } => {
+            let version = data_version(&input)?;
+            let map = load(&input)?;
+            maps::server::serve(
+                map,
+                maps::server::ServeOptions {
+                    addr,
+                    cache_bytes: cache_mb << 20,
+                    version,
+                },
+            )
         }
         Command::Info { input } => {
             let map = load(&input)?;

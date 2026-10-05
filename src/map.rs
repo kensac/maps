@@ -4,7 +4,7 @@
 use crate::assemble::{
     assemble_coastlines, assemble_rings, land_polygons, orient_rings, Background,
 };
-use crate::classify::{Group, Kind};
+use crate::classify::{flags, Detail, Group, Kind};
 use crate::geo::{signed_area2, Point, Rect, TILE_SIZE};
 use crate::ingest::RawData;
 use rayon::prelude::*;
@@ -23,8 +23,13 @@ pub struct Feature {
     /// Index of the first ring in [`Map::ring_starts`].
     pub ring_start: u32,
     pub ring_count: u32,
-    /// Building height in meters; admin level for boundaries.
+    /// Top above the ground in meters (admin level for boundaries).
     pub height: f32,
+    /// Bottom above the ground in meters: `min_height`, or the roof an
+    /// object stands on.
+    pub base: f32,
+    /// Index into [`Map::details`] for solids with roof/facade detail.
+    pub detail: u32,
     /// Zoom from which the feature is drawn: its kind's minimum zoom, or the
     /// zoom at which it grows past a pixel, whichever is later.
     pub vis_zoom: f32,
@@ -51,7 +56,40 @@ pub struct Map {
     pub ring_starts: Vec<u32>,
     /// Sorted in draw order.
     pub features: Vec<Feature>,
+    /// Top of the tallest structure, in meters.
+    pub max_height: f32,
+    /// Roof and facade detail of solids, indexed by [`Feature::detail`].
+    pub details: Vec<Detail>,
     index: Vec<RTree<Entry>>,
+}
+
+/// Per-feature attributes passed through map building.
+#[derive(Clone, Copy)]
+struct Attrs {
+    kind: Kind,
+    flags: u8,
+    layer: i8,
+    height: f32,
+    base: f32,
+    detail: Option<Detail>,
+}
+
+impl Attrs {
+    fn new(kind: Kind, flags: u8, layer: i8, height: f32, base: f32) -> Self {
+        Attrs {
+            kind,
+            flags,
+            layer,
+            height,
+            base,
+            detail: None,
+        }
+    }
+
+    fn with_detail(mut self, detail: Option<Detail>) -> Self {
+        self.detail = detail;
+        self
+    }
 }
 
 /// Accumulates features for one chunk of input; chunks build in parallel and
@@ -61,18 +99,19 @@ struct Chunk {
     points: Vec<[f32; 2]>,
     ring_starts: Vec<u32>,
     features: Vec<(Feature, f32)>,
+    details: Vec<Detail>,
 }
 
 impl Chunk {
-    fn push(
-        &mut self,
-        origin: Point,
-        kind: Kind,
-        flags: u8,
-        layer: i8,
-        height: f32,
-        rings: &[Vec<Point>],
-    ) {
+    fn push(&mut self, origin: Point, a: Attrs, rings: &[Vec<Point>]) {
+        let Attrs {
+            kind,
+            flags,
+            layer,
+            height,
+            base,
+            detail,
+        } = a;
         let mut bbox = Rect::EMPTY;
         let ring_start = self.ring_starts.len() as u32;
         let mut area2 = 0.0;
@@ -117,6 +156,13 @@ impl Chunk {
             return;
         }
         let local = |v: f64, o: f64| (v - o) as f32;
+        let detail = match detail {
+            Some(d) => {
+                self.details.push(d);
+                self.details.len() as u32 - 1
+            }
+            None => u32::MAX,
+        };
         self.features.push((
             Feature {
                 kind,
@@ -125,6 +171,8 @@ impl Chunk {
                 ring_start,
                 ring_count,
                 height,
+                base,
+                detail,
                 vis_zoom,
                 bbox: [
                     local(bbox.min_x, origin[0]),
@@ -151,6 +199,107 @@ fn resolve(raw: &RawData, refs: &[i64]) -> Vec<Point> {
     out
 }
 
+/// Even-odd containment of `p` in a feature's rings.
+fn contains(rings: &[&[[f32; 2]]], p: [f32; 2]) -> bool {
+    let mut inside = false;
+    for ring in rings {
+        let n = ring.len();
+        let mut j = n.wrapping_sub(1);
+        for i in 0..n {
+            let ([xi, yi], [xj, yj]) = (ring[i], ring[j]);
+            if (yi > p[1]) != (yj > p[1]) && p[0] < (xj - xi) * (p[1] - yi) / (yj - yi) + xi {
+                inside = !inside;
+            }
+            j = i;
+        }
+    }
+    inside
+}
+
+/// Places structures relative to each other, as mapped:
+///
+/// - A building split into `building:part`s is drawn through its parts; its
+///   outline (which would swallow them) is dropped.
+/// - Objects tagged `location=roof` stand on the building beneath them.
+fn place_structures(features: &mut Vec<(Feature, f32)>, points: &[[f32; 2]], starts: &[u32]) {
+    let rings_of = |f: &Feature| -> Vec<&[[f32; 2]]> {
+        (f.ring_start..f.ring_start + f.ring_count)
+            .map(|r| &points[starts[r as usize] as usize..starts[r as usize + 1] as usize])
+            .collect()
+    };
+    // A point standing for the feature: its first ring's vertex average.
+    let anchor = |f: &Feature| -> [f32; 2] {
+        let ring = &points
+            [starts[f.ring_start as usize] as usize..starts[f.ring_start as usize + 1] as usize];
+        let n = ring.len() as f32;
+        let (sx, sy) = ring
+            .iter()
+            .fold((0.0, 0.0), |(x, y), p| (x + p[0], y + p[1]));
+        [sx / n, sy / n]
+    };
+    let buildings: Vec<GeomWithData<Rectangle<[f32; 2]>, usize>> = features
+        .iter()
+        .enumerate()
+        .filter(|(_, (f, _))| f.kind == Kind::Building)
+        .map(|(i, (f, _))| {
+            let r = Rectangle::from_corners([f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[3]]);
+            GeomWithData::new(r, i)
+        })
+        .collect();
+    if buildings.is_empty() {
+        return;
+    }
+    let index = RTree::bulk_load(buildings);
+
+    let hidden: Vec<usize> = features
+        .par_iter()
+        .filter(|(f, _)| f.flags & flags::PART != 0)
+        .flat_map_iter(|(part, _)| {
+            let p = anchor(part);
+            index
+                .locate_all_at_point(p)
+                .filter(|e| {
+                    let outline = &features[e.data].0;
+                    outline.flags & flags::PART == 0 && contains(&rings_of(outline), p)
+                })
+                .map(|e| e.data)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut is_hidden = vec![false; features.len()];
+    for i in hidden {
+        is_hidden[i] = true;
+    }
+
+    let lifts: Vec<(usize, f32)> = features
+        .par_iter()
+        .enumerate()
+        .filter(|(_, (f, _))| f.flags & flags::ON_ROOF != 0)
+        .filter_map(|(i, (f, _))| {
+            let p = anchor(f);
+            let roof = index
+                .locate_all_at_point(p)
+                .filter(|e| e.data != i && !is_hidden[e.data])
+                .map(|e| &features[e.data].0)
+                .filter(|b| contains(&rings_of(b), p))
+                .map(|b| b.height)
+                .fold(0.0_f32, f32::max);
+            (roof > 0.0).then_some((i, roof))
+        })
+        .collect();
+    for (i, roof) in lifts {
+        let f = &mut features[i].0;
+        f.base += roof;
+        f.height += roof;
+    }
+
+    let mut i = 0;
+    features.retain(|_| {
+        i += 1;
+        !is_hidden[i - 1]
+    });
+}
+
 /// Polygon rings are stored without the closing repeat of the first point.
 fn open_ring(mut ring: Vec<Point>) -> Vec<Point> {
     if ring.len() > 1 && ring.first() == ring.last() {
@@ -171,6 +320,8 @@ impl Map {
         let ways = raw.ways.par_chunks(4096).map(|chunk| {
             let mut c = Chunk::default();
             for w in chunk {
+                let attrs =
+                    Attrs::new(w.kind, w.flags, w.layer, w.height, w.base).with_detail(w.detail);
                 let pts = resolve(&raw, &w.refs);
                 if w.kind.is_area() {
                     let mut rings = [open_ring(pts)];
@@ -178,9 +329,9 @@ impl Map {
                         continue;
                     }
                     orient_rings(&mut rings);
-                    c.push(origin, w.kind, w.flags, w.layer, w.height, &rings);
+                    c.push(origin, attrs, &rings);
                 } else if pts.len() >= 2 {
-                    c.push(origin, w.kind, w.flags, w.layer, w.height, &[pts]);
+                    c.push(origin, attrs, &[pts]);
                 }
             }
             c
@@ -203,7 +354,9 @@ impl Map {
                     continue;
                 }
                 orient_rings(&mut rings);
-                c.push(origin, mp.kind, mp.flags, mp.layer, mp.height, &rings);
+                let attrs = Attrs::new(mp.kind, mp.flags, mp.layer, mp.height, mp.base)
+                    .with_detail(mp.detail);
+                c.push(origin, attrs, &rings);
             }
             c
         });
@@ -215,7 +368,8 @@ impl Map {
                     if let Some(refs) = raw.member_ways.get(id) {
                         let pts = resolve(&raw, refs);
                         if pts.len() >= 2 {
-                            c.push(origin, Kind::Boundary, 0, 0, level as f32, &[pts]);
+                            let attrs = Attrs::new(Kind::Boundary, 0, 0, level as f32, 0.0);
+                            c.push(origin, attrs, &[pts]);
                         }
                     }
                     c
@@ -223,8 +377,9 @@ impl Map {
 
         let points = raw.points.par_chunks(65536).map(|chunk| {
             let mut c = Chunk::default();
-            for &(kind, p) in chunk {
-                c.push(origin, kind, 0, 0, 0.0, &[vec![p]]);
+            for p in chunk {
+                let attrs = Attrs::new(p.kind, p.flags, 0, p.height, 0.0);
+                c.push(origin, attrs, &[vec![p.at]]);
             }
             c
         });
@@ -234,7 +389,7 @@ impl Map {
             let chains: Vec<Vec<Point>> = coast_ids.iter().map(|c| resolve(&raw, c)).collect();
             let (background, rings) = land_polygons(&chains, &bounds);
             let mut c = Chunk::default();
-            c.push(origin, Kind::Land, 0, 0, 0.0, &rings);
+            c.push(origin, Attrs::new(Kind::Land, 0, 0, 0.0, 0.0), &rings);
             (background, c)
         };
         let ((background, land), mut chunks) = rayon::join(build_land, || {
@@ -251,16 +406,28 @@ impl Map {
         let mut map_points = Vec::with_capacity(total_points);
         let mut ring_starts = Vec::with_capacity(total_rings);
         let mut features = Vec::new();
+        let mut details = Vec::new();
         for c in chunks {
             let (p0, r0) = (map_points.len() as u32, ring_starts.len() as u32);
+            let d0 = details.len() as u32;
             map_points.extend_from_slice(&c.points);
             ring_starts.extend(c.ring_starts.iter().map(|s| s + p0));
+            details.extend_from_slice(&c.details);
             features.extend(c.features.into_iter().map(|(mut f, area)| {
                 f.ring_start += r0;
+                if f.detail != u32::MAX {
+                    f.detail += d0;
+                }
                 (f, area)
             }));
         }
         ring_starts.push(map_points.len() as u32);
+        place_structures(&mut features, &map_points, &ring_starts);
+        let max_height = features
+            .iter()
+            .filter(|(f, _)| f.kind.is_extrusion() || f.kind.is_point())
+            .map(|(f, _)| f.height)
+            .fold(0.0_f32, f32::max);
 
         // Draw order: by group; transport by layer; areas largest first so
         // that small parcels sit on top of the large ones containing them.
@@ -294,6 +461,8 @@ impl Map {
             points: map_points,
             ring_starts,
             features,
+            max_height,
+            details,
             index,
         };
         eprintln!(
@@ -303,6 +472,14 @@ impl Map {
             t.elapsed()
         );
         map
+    }
+
+    /// Roof and facade detail of a solid, if mapped.
+    pub fn detail(&self, f: &Feature) -> Detail {
+        self.details
+            .get(f.detail as usize)
+            .copied()
+            .unwrap_or_default()
     }
 
     pub fn ring(&self, r: u32) -> &[[f32; 2]] {

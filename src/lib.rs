@@ -12,4 +12,5 @@ pub mod ingest;
 pub mod map;
 pub mod output;
 pub mod render;
+pub mod server;
 pub mod style;
