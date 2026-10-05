@@ -75,6 +75,19 @@ pub fn count_tiles(bounds: &Rect, min_zoom: u8, max_zoom: u8) -> u64 {
         .sum()
 }
 
+/// Renders and writes one tile, returning its size in bytes.
+///
+/// Kept out of line on purpose: inlined into rayon's recursive splitting, the
+/// PNG encoder's large stack buffers would be reserved at every recursion
+/// level and overflow worker stacks on big pyramids.
+#[inline(never)]
+fn write_tile(renderer: &Renderer, dir: &Path, z: u8, x: u32, y: u32, scale: f32) -> Result<u64> {
+    let png = encode_png(renderer.render(&Viewport::tile(z, x, y, scale)))?;
+    let path = dir.join(format!("{z}/{x}/{y}.png"));
+    fs::write(&path, &png).with_context(|| format!("writing {}", path.display()))?;
+    Ok(png.len() as u64)
+}
+
 /// Renders `{z}/{x}/{y}.png` for every tile covering the map in the zoom
 /// range, plus an `index.html` that browses them.
 pub fn write_tiles(
@@ -108,11 +121,9 @@ pub fn write_tiles(
             .flat_map(|x| (y0..=y1).map(move |y| (x, y)))
             .collect();
         tiles.par_iter().try_for_each(|&(x, y)| -> Result<()> {
-            let vp = Viewport::tile(z, x, y, scale);
-            let png = encode_png(renderer.render(&vp))?;
-            bytes.fetch_add(png.len() as u64, Ordering::Relaxed);
-            let path = dir.join(format!("{z}/{x}/{y}.png"));
-            fs::write(&path, png).with_context(|| format!("writing {}", path.display()))
+            let written = write_tile(renderer, dir, z, x, y, scale)?;
+            bytes.fetch_add(written, Ordering::Relaxed);
+            Ok(())
         })?;
         let secs = t.elapsed().as_secs_f64();
         eprintln!(

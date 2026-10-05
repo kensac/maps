@@ -89,7 +89,12 @@ fn load(path: &Path) -> Result<Map> {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    // Headroom for deep work-stealing recursion over large tile sets.
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(8 << 20)
+        .build_global()?;
+    match cli.command {
         Command::Render {
             common,
             output,
