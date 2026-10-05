@@ -103,7 +103,15 @@ impl Chunk {
         } else {
             f32::INFINITY
         };
-        let vis_zoom = kind.min_zoom(flags).max(size_zoom);
+        let mut vis_zoom = kind.min_zoom(flags).max(size_zoom);
+        if kind == Kind::Boundary {
+            // Height carries the admin level: local borders only up close.
+            vis_zoom = vis_zoom.max(match height as u8 {
+                0..=4 => 4.0,
+                5..=6 => 9.0,
+                _ => 12.0,
+            });
+        }
         if !vis_zoom.is_finite() {
             self.ring_starts.truncate(ring_start as usize);
             return;

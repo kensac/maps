@@ -21,6 +21,24 @@ use tiny_skia::{
 const TOLERANCE: f64 = 0.3;
 /// Buildings cast shadows from this zoom on, fading in over one level.
 const SHADOW_ZOOM: f32 = 14.5;
+/// Buildings are extruded from this zoom on (in [`Buildings::Extruded`] mode).
+const EXTRUDE_ZOOM: f32 = 15.0;
+/// Screen height of a building relative to its true scale: an oblique view
+/// tilted roughly 35° from straight down.
+const EXTRUDE_SCALE: f64 = 0.6;
+/// Cap on extrusion height in pixels (at scale 1), so supertall towers stay
+/// within a bounded query margin.
+const MAX_EXTRUDE: f64 = 512.0;
+
+/// How buildings are drawn at high zoom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Buildings {
+    /// Flat footprints with cast shadows.
+    Flat,
+    /// 2.5D: walls and roofs extruded by building height.
+    #[default]
+    Extruded,
+}
 
 /// A rectangle of the world at a given zoom, in output pixels.
 #[derive(Clone, Copy, Debug)]
@@ -74,6 +92,7 @@ struct LineGeom {
 pub struct Renderer<'a> {
     map: &'a Map,
     theme: &'a Theme,
+    buildings: Buildings,
 }
 
 /// Local → pixel transform and the per-viewport style context.
@@ -168,8 +187,12 @@ fn push_ring(pb: &mut PathBuilder, pts: &[Point]) {
 }
 
 impl<'a> Renderer<'a> {
-    pub fn new(map: &'a Map, theme: &'a Theme) -> Self {
-        Renderer { map, theme }
+    pub fn new(map: &'a Map, theme: &'a Theme, buildings: Buildings) -> Self {
+        Renderer {
+            map,
+            theme,
+            buildings,
+        }
     }
 
     pub fn render(&self, vp: &Viewport) -> Pixmap {
@@ -214,18 +237,28 @@ impl<'a> Renderer<'a> {
         });
 
         let mut s = Scratch::default();
-        // Query generously: wide strokes and shadows reach beyond feature bounds.
+        let extrude = self.buildings == Buildings::Extruded && frame.ctx.zoom >= EXTRUDE_ZOOM;
+        // Query generously: wide strokes and shadows reach beyond feature
+        // bounds, and extruded buildings south of the view rise into it.
         let margin = 160.0 * vp.scale as f64;
+        let below = if extrude {
+            margin + MAX_EXTRUDE * vp.scale as f64
+        } else {
+            margin
+        };
         let to_local = |px: f64, origin: f64| ((px / k) - origin) as f32;
         let area = [
             to_local(vp.x - margin, map.origin[0]),
             to_local(vp.y - margin, map.origin[1]),
             to_local(vp.x + vp.width as f64 + margin, map.origin[0]),
-            to_local(vp.y + vp.height as f64 + margin, map.origin[1]),
+            to_local(vp.y + vp.height as f64 + below, map.origin[1]),
         ];
         map.query(area, frame.vis_zoom, &mut s.ids);
         let ids = std::mem::take(&mut s.ids);
 
+        // Extruded buildings are drawn after ground-level streets and trees,
+        // which they occlude, but before bridges and overlays.
+        let mut deferred: Option<&[u32]> = None;
         let mut i = 0;
         while i < ids.len() {
             let first = &map.features[ids[i] as usize];
@@ -241,10 +274,16 @@ impl<'a> Renderer<'a> {
                 j += 1;
             }
             let run = &ids[i..j];
+            if group > Group::Trees {
+                if let Some(buildings) = deferred.take() {
+                    self.draw_extruded(pixmap, &frame, buildings, &mut s);
+                }
+            }
             match group {
                 Group::Land | Group::Areas | Group::AreaOverlays => {
                     self.draw_areas(pixmap, &frame, run, &mut s)
                 }
+                Group::Buildings if extrude => deferred = Some(run),
                 Group::Buildings => {
                     if frame.ctx.zoom >= SHADOW_ZOOM {
                         self.draw_shadows(pixmap, &frame, run, &mut s);
@@ -255,6 +294,9 @@ impl<'a> Renderer<'a> {
                 _ => self.draw_lines(pixmap, &frame, run, &mut s),
             }
             i = j;
+        }
+        if let Some(buildings) = deferred {
+            self.draw_extruded(pixmap, &frame, buildings, &mut s);
         }
 
         self.mask_outside(pixmap, &frame);
@@ -369,6 +411,99 @@ impl<'a> Renderer<'a> {
                 Transform::identity(),
                 None,
             );
+        }
+    }
+
+    /// 2.5D buildings in an oblique view from the south: each roof is the
+    /// footprint lifted straight up the screen by the building's height, and
+    /// the walls are the quads swept by footprint edges that face the viewer
+    /// (roof plus those walls cover the whole footprint, so it needs no fill
+    /// of its own). Walls are shaded by facing against light from the
+    /// west-southwest. Buildings are painted back to front, ordered by their
+    /// southern edge, so nearer buildings occlude farther ones; the order is
+    /// global, so it is identical in neighbouring tiles.
+    fn draw_extruded(&self, pixmap: &mut Pixmap, fr: &Frame, run: &[u32], s: &mut Scratch) {
+        const SHADES: usize = 4;
+        let features = &self.map.features;
+        let mut order = run.to_vec();
+        order.sort_by(|&a, &b| {
+            let (fa, fb) = (&features[a as usize], &features[b as usize]);
+            fa.bbox[3].total_cmp(&fb.bbox[3]).then(a.cmp(&b))
+        });
+
+        let scale = fr.ctx.scale as f64;
+        let cap = MAX_EXTRUDE * scale;
+        let clip = fr.rect(cap + 2.0);
+        let light = {
+            let (x, y) = (-1.0_f64, 0.5_f64);
+            let len = (x * x + y * y).sqrt();
+            [x / len, y / len]
+        };
+        let roof = paint(self.theme.roof());
+        let walls: Vec<Paint> = (0..SHADES)
+            .map(|i| paint(self.theme.facade(i as f32 / (SHADES - 1) as f32)))
+            .collect();
+        let outline = (fr.ctx.zoom >= 16.0).then(|| {
+            let spec = StrokeSpec {
+                color: self.theme.building_outline(),
+                width: 0.6 * fr.ctx.scale,
+                dash: None,
+                round: true,
+            };
+            (paint(spec.color), stroke(&spec, 0.0))
+        });
+
+        for id in order {
+            let f = &features[id as usize];
+            let height = if f.height > 0.0 { f.height } else { 6.0 };
+            let lift = (height as f64 * fr.ctx.ppm as f64 * EXTRUDE_SCALE).min(cap);
+            let bbox = fr.bbox(f);
+            let inside =
+                clip.contains([bbox.min_x, bbox.min_y]) && clip.contains([bbox.max_x, bbox.max_y]);
+            let mut wall_paths: [Option<PathBuilder>; SHADES] = Default::default();
+            let mut roof_path = PathBuilder::new();
+            for ring in self.map.rings(f) {
+                fr.project(ring, &mut s.pts);
+                if !inside {
+                    clip_ring(&mut s.pts, &clip, &mut s.tmp);
+                }
+                let n = s.pts.len();
+                if n < 3 {
+                    continue;
+                }
+                for e in 0..n {
+                    let (a, b) = (s.pts[e], s.pts[(e + 1) % n]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    // Rings keep the footprint on their left, so the outward
+                    // normal is (dy, -dx): the edge faces the viewer (down the
+                    // screen) when dx < 0.
+                    if dx >= 0.0 || lift < 0.5 {
+                        continue;
+                    }
+                    let len = (dx * dx + dy * dy).sqrt();
+                    let lit = ((dy * light[0] - dx * light[1]) / len).max(0.0);
+                    let shade = ((lit * SHADES as f64) as usize).min(SHADES - 1);
+                    let quad = [a, b, [b[0], b[1] - lift], [a[0], a[1] - lift]];
+                    push_ring(
+                        wall_paths[shade].get_or_insert_with(PathBuilder::new),
+                        &quad,
+                    );
+                }
+                s.tmp.clear();
+                s.tmp.extend(s.pts.iter().map(|p| [p[0], p[1] - lift]));
+                push_ring(&mut roof_path, &s.tmp);
+            }
+            for (pb, p) in wall_paths.into_iter().zip(&walls) {
+                if let Some(path) = pb.and_then(PathBuilder::finish) {
+                    pixmap.fill_path(&path, p, FillRule::Winding, Transform::identity(), None);
+                }
+            }
+            if let Some(path) = roof_path.finish() {
+                pixmap.fill_path(&path, &roof, FillRule::Winding, Transform::identity(), None);
+                if let Some((p, st)) = &outline {
+                    pixmap.stroke_path(&path, p, st, Transform::identity(), None);
+                }
+            }
         }
     }
 

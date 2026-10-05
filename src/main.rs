@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use maps::geo::{unproject, Rect};
 use maps::map::Map;
 use maps::output::{count_tiles, write_poster, write_tiles, PosterSize};
-use maps::render::Renderer;
+use maps::render::{Buildings, Renderer};
 use maps::style::ThemeName;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -64,6 +64,9 @@ struct Common {
     /// Pixel ratio; 2 renders crisp output for high-DPI screens.
     #[arg(short, long, default_value_t = 1.0)]
     scale: f32,
+    /// How to draw buildings from zoom 15 on.
+    #[arg(short, long, value_enum, default_value_t)]
+    buildings: Buildings,
 }
 
 fn parse_bbox(s: &str) -> Result<Rect, String> {
@@ -111,7 +114,7 @@ fn main() -> Result<()> {
                 bail!("--bbox does not overlap the extract");
             }
             let size = zoom.map_or(PosterSize::Width(width), PosterSize::Zoom);
-            let renderer = Renderer::new(&map, common.theme.theme());
+            let renderer = Renderer::new(&map, common.theme.theme(), common.buildings);
             write_poster(&renderer, region, size, common.scale, &output)
         }
         Command::Tiles {
@@ -121,7 +124,7 @@ fn main() -> Result<()> {
             max_zoom,
         } => {
             let map = load(&common.input)?;
-            let renderer = Renderer::new(&map, common.theme.theme());
+            let renderer = Renderer::new(&map, common.theme.theme(), common.buildings);
             write_tiles(&renderer, &map, &output, min_zoom, max_zoom, common.scale)
         }
         Command::Info { input } => {

@@ -6,9 +6,9 @@ tile pyramid, entirely offline.
 
 ![New York City, rendered from a 184 MB extract](docs/nyc.jpg)
 
-| Midtown at z17 (building shadows, street trees) | Lower Manhattan, dark theme |
+| Financial District in 3D, z17 | Midtown in the dark theme |
 | --- | --- |
-| ![Midtown](docs/midtown.jpg) | ![Lower Manhattan, dark theme](docs/dark.jpg) |
+| ![Financial District, extruded buildings](docs/fidi.jpg) | ![Midtown, dark theme](docs/dark.jpg) |
 
 ![JFK airport](docs/jfk.jpg)
 
@@ -22,9 +22,13 @@ tile pyramid, entirely offline.
   clipped to the extract, so the sea is actually blue.
 - **Real multipolygons**: rings are assembled from relation members and holes
   are rendered correctly (courtyards, islands in lakes, lakes on islands).
-- **Pseudo-3D buildings**: each footprint casts a shadow sized from its
-  `height` / `building:levels` tags.
-- **Light and dark themes**, plus `--scale 2` for high-DPI output.
+- **3D buildings**: from zoom 15, buildings are extruded by their `height` /
+  `building:levels` tags in an oblique view, with facades shaded by
+  orientation and back-to-front painting. `--buildings flat` switches to flat
+  footprints with cast shadows instead.
+- **Two custom themes**: *Daylight* (warm paper, teal water, a single amber
+  highway accent) and *Midnight* (ink-blue land, streets that glow warmer
+  with importance), plus `--scale 2` for high-DPI output.
 - **Tiles or posters**: an XYZ pyramid with a bundled Leaflet viewer, or a
   single image of any size, streamed to disk in bands so gigapixel posters fit
   in memory.
@@ -118,8 +122,14 @@ compressed blobs, instead of holding every node in memory:
 - Vertices are projected, simplified to a 0.3 px tolerance, and clipped with
   Sutherland–Hodgman (polygons) or Liang–Barsky (lines) before reaching the
   [tiny-skia](https://github.com/linebender/tiny-skia) rasterizer.
-- Building shadows are the footprint swept along the light direction. Only the
-  quads of edges facing away from the light are needed, and they share a
+- 3D buildings are painted back to front, sorted by their southern edge in
+  one global order, so neighbouring tiles agree. Each building is a roof
+  (the footprint lifted up the screen) plus the walls swept by its
+  viewer-facing edges; together they cover the footprint, so it needs no
+  fill of its own. Queries extend below the viewport so towers south of a
+  tile still rise into it.
+- Flat-mode shadows are the footprint swept along the light direction. Only
+  the quads of edges facing away from the light are needed, and they share a
   winding, so overlapping shadows union instead of stacking.
 
 **Output** (`src/output.rs`) renders tiles on all cores. Posters are rendered
