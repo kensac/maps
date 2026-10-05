@@ -1,6 +1,15 @@
-pub mod cache;
-pub mod drawing;
-pub mod graph;
-pub mod osm;
-pub mod types;
-pub mod utils;
+//! A fast, parallel OpenStreetMap renderer.
+//!
+//! Pipeline: [`ingest`] reads an `.osm.pbf` file in three parallel passes,
+//! [`map`] assembles and indexes render-ready geometry, and [`render`] draws
+//! any viewport with a [`style::Theme`], which [`output`] turns into XYZ tiles
+//! or one large poster image.
+
+pub mod assemble;
+pub mod classify;
+pub mod geo;
+pub mod ingest;
+pub mod map;
+pub mod output;
+pub mod render;
+pub mod style;

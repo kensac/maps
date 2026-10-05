@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>maps</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body, #map { height: 100%; margin: 0; background: #888; }
+    .leaflet-container { font: 12px/1.4 system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    const bounds = L.latLngBounds({{BOUNDS}});
+    const map = L.map('map', {
+      minZoom: {{MIN_ZOOM}},
+      maxZoom: {{MAX_ZOOM}} + 2,
+      maxBounds: bounds.pad(0.5),
+      zoomSnap: 0.25,
+    });
+    L.tileLayer('{z}/{x}/{y}.png', {
+      minZoom: {{MIN_ZOOM}},
+      maxNativeZoom: {{MAX_ZOOM}},
+      maxZoom: {{MAX_ZOOM}} + 2,
+      bounds,
+      attribution: 'Data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    map.fitBounds(bounds);
+    L.control.scale().addTo(map);
+  </script>
+</body>
+</html>
