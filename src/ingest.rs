@@ -44,6 +44,8 @@ pub struct RawWay {
 pub struct RawPoint {
     pub kind: Kind,
     pub flags: u8,
+    /// Model variant (e.g. a tower's type).
+    pub variant: u8,
     pub height: f32,
     pub at: Point,
 }
@@ -353,7 +355,7 @@ pub fn read(path: &Path) -> Result<RawData> {
             let mut cursor: Option<usize> = None;
             let mut last_id = i64::MIN;
             let mut bbox = acc.bbox.unwrap_or(Rect::EMPTY);
-            let mut visit = |id: i64, lon: f64, lat: f64, tagged: Option<(Kind, u8, f32)>| {
+            let mut visit = |id: i64, lon: f64, lat: f64, tagged: Option<(Kind, u8, u8, f32)>| {
                 let c = match cursor {
                     Some(mut c) if id >= last_id => {
                         while c < ids.len() && ids[c] < id {
@@ -370,17 +372,19 @@ pub fn read(path: &Path) -> Result<RawData> {
                 if c < ids.len() && ids[c] == id {
                     acc.hits.push((c as u32, p));
                 }
-                if let Some((kind, flags, height)) = tagged {
+                if let Some((kind, flags, variant, height)) = tagged {
                     acc.points.push(RawPoint {
                         kind,
                         flags,
+                        variant,
                         height,
                         at: p,
                     });
                 }
             };
-            let object =
-                |tags: Tags| node_kind(&tags).map(|k| (k, tags.flags(), dimensions(k, &tags).0));
+            let object = |tags: Tags| {
+                node_kind(&tags).map(|k| (k, tags.flags(), tags.variant(), dimensions(k, &tags).0))
+            };
             for group in block.groups() {
                 for n in group.dense_nodes() {
                     let tagged = if n.raw_tags().len() > 0 {

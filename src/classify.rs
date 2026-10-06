@@ -55,6 +55,8 @@ pub struct Tags<'a> {
     pub roof_colour: Option<&'a str>,
     pub roof_orientation: Option<&'a str>,
     pub building_colour: Option<&'a str>,
+    pub tower_type: Option<&'a str>,
+    pub tower_construction: Option<&'a str>,
     pub kind: Option<&'a str>,
 }
 
@@ -111,6 +113,8 @@ impl<'a> Tags<'a> {
                 "roof:colour" | "roof:color" => &mut t.roof_colour,
                 "roof:orientation" => &mut t.roof_orientation,
                 "building:colour" | "building:color" | "colour" => &mut t.building_colour,
+                "tower:type" => &mut t.tower_type,
+                "tower:construction" => &mut t.tower_construction,
                 "type" => &mut t.kind,
                 _ => continue,
             };
@@ -229,6 +233,82 @@ impl<'a> Tags<'a> {
                     .map(|l| l * 3.2)
             })
             .unwrap_or(0.0)
+    }
+}
+
+/// What kind of tower a `man_made=tower` is, for its model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TowerType {
+    #[default]
+    Generic,
+    /// A single tapered pole with antenna panels.
+    Monopole,
+    /// A braced steel lattice.
+    Lattice,
+    /// A lattice held by guy wires.
+    Guyed,
+    /// A pole carrying floodlights.
+    Lighting,
+    /// A masonry tower topped by a spire (bell and clock towers).
+    Belfry,
+    /// A slender round tower with a balcony and a pointed cap.
+    Minaret,
+    /// A tower with a viewing deck.
+    Observation,
+}
+
+impl Tags<'_> {
+    /// Model variant of a point object (currently: tower types).
+    pub fn variant(&self) -> u8 {
+        if self.man_made != Some("tower") {
+            return 0;
+        }
+        let t = match (self.tower_type, self.tower_construction) {
+            (_, Some("guyed_lattice" | "guyed")) => TowerType::Guyed,
+            (_, Some("lattice" | "truss")) => TowerType::Lattice,
+            (Some("lighting"), _) => TowerType::Lighting,
+            (Some("bell_tower" | "clock_tower" | "church"), _) => TowerType::Belfry,
+            (Some("minaret"), _) => TowerType::Minaret,
+            (Some("observation"), _) => TowerType::Observation,
+            (Some("communication" | "telecommunication" | "radar"), _) => TowerType::Monopole,
+            (_, Some("monopole" | "mast" | "concealed" | "tube" | "freestanding")) => {
+                TowerType::Monopole
+            }
+            _ => TowerType::Generic,
+        };
+        t as u8
+    }
+}
+
+impl TowerType {
+    pub fn from_u8(v: u8) -> Self {
+        use TowerType::*;
+        [
+            Generic,
+            Monopole,
+            Lattice,
+            Guyed,
+            Lighting,
+            Belfry,
+            Minaret,
+            Observation,
+        ]
+        .get(v as usize)
+        .copied()
+        .unwrap_or(Generic)
+    }
+
+    /// Typical height in meters.
+    fn height(self) -> f32 {
+        match self {
+            TowerType::Lighting => 20.0,
+            TowerType::Monopole => 30.0,
+            TowerType::Lattice | TowerType::Guyed => 45.0,
+            TowerType::Belfry => 30.0,
+            TowerType::Minaret => 35.0,
+            TowerType::Observation | TowerType::Generic => 25.0,
+        }
     }
 }
 
@@ -639,7 +719,7 @@ impl Kind {
             Flagpole => 10.0,
             Mast => 30.0,
             Chimney => 40.0,
-            Tower => 25.0,
+            Tower => TowerType::from_u8(t.variant()).height(),
             WaterTower => 30.0,
             Crane => 40.0,
             Bollard => 0.9,
@@ -1162,6 +1242,24 @@ mod tests {
         assert_eq!(d.facade_colour, Some(0x8a5a3c));
         assert_eq!(parse_colour("#FFFFFF"), Some(0xffffff));
         assert_eq!(parse_colour("plaid"), None);
+    }
+
+    #[test]
+    fn tower_types() {
+        let v = |kv: &[(&str, &str)]| TowerType::from_u8(tags(kv).variant());
+        assert_eq!(
+            v(&[("man_made", "tower"), ("tower:type", "communication")]),
+            TowerType::Monopole
+        );
+        assert_eq!(
+            v(&[("man_made", "tower"), ("tower:construction", "guyed_lattice")]),
+            TowerType::Guyed
+        );
+        assert_eq!(
+            v(&[("man_made", "tower"), ("tower:type", "bell_tower")]),
+            TowerType::Belfry
+        );
+        assert_eq!(v(&[("man_made", "mast")]), TowerType::Generic);
     }
 
     #[test]

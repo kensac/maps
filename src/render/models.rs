@@ -11,7 +11,7 @@ use super::camera::Frame;
 use super::mesh::{shade, Mesh, V3};
 use super::paint::paint;
 use super::Renderer;
-use crate::classify::{flags, Kind};
+use crate::classify::{flags, Kind, TowerType};
 use crate::geo::Point;
 use crate::map::Feature;
 use crate::style::ObjectPaint;
@@ -60,8 +60,117 @@ fn tree(m: &mut Mesh, h: f64, conifer: bool, c: &ObjectPaint, trunk: Color) {
     m.ball([0.0, 0.0, h - crown], crown, c.body, c.top);
 }
 
+/// A braced steel lattice: legs tapering from `base` to `top` half-widths,
+/// rings and cross-bracing on the viewer-facing sides.
+fn lattice(m: &mut Mesh, h: f64, base: f64, top: f64, w: f64, color: Color) {
+    let corners = [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
+    let half = |z: f64| base + (top - base) * z / h;
+    for [x, y] in corners {
+        m.beam([x * base, y * base, 0.0], [x * top, y * top, h], w, color);
+    }
+    let levels = ((h / 6.0) as usize).clamp(2, 24);
+    for i in 1..=levels {
+        let (z0, z1) = (
+            (i - 1) as f64 * h / levels as f64,
+            i as f64 * h / levels as f64,
+        );
+        let (s0, s1) = (half(z0), half(z1));
+        for k in 0..4 {
+            let (p, q) = (corners[k], corners[(k + 1) % 4]);
+            m.beam(
+                [p[0] * s1, p[1] * s1, z1],
+                [q[0] * s1, q[1] * s1, z1],
+                w * 0.6,
+                color,
+            );
+        }
+        m.beam([-s0, s0, z0], [s1, s1, z1], w * 0.5, color);
+        m.beam([s0, s0, z0], [-s1, s1, z1], w * 0.5, color);
+        m.beam([s0, -s0, z0], [s1, s1, z1], w * 0.5, color);
+    }
+}
+
+/// Bespoke models of `man_made=tower` by tower type.
+fn tower(m: &mut Mesh, h: f64, variant: u8, c: &ObjectPaint) {
+    let (body, top, accent) = (c.body, c.top, c.accent);
+    let steel = rgb(0x8d949c);
+    let antenna = rgb(0xd8d6d0);
+    match TowerType::from_u8(variant) {
+        TowerType::Monopole => {
+            m.cylinder(0.0, 0.0, 0.45, 0.0, 0.5 * h, steel, steel, 8);
+            m.cylinder(0.0, 0.0, 0.3, 0.5 * h, h, steel, steel, 8);
+            // Three sectors of panel antennas near the top.
+            for k in 0..3 {
+                let t = k as f64 * std::f64::consts::TAU / 3.0 + 0.5;
+                let (x, y) = (0.7 * t.cos(), 0.7 * t.sin());
+                m.cuboid(x, y, 0.3, 0.3, h - 2.5, h - 0.3, antenna, antenna);
+            }
+        }
+        TowerType::Lattice => lattice(m, h, (0.06 * h).clamp(1.0, 4.0), 0.5, 0.18, steel),
+        TowerType::Guyed => {
+            lattice(m, h, 0.5, 0.5, 0.12, steel);
+            for k in 0..3 {
+                let t = k as f64 * std::f64::consts::TAU / 3.0;
+                let r = 0.45 * h;
+                for frac in [0.5, 0.95] {
+                    m.beam(
+                        [0.0, 0.0, frac * h],
+                        [r * t.cos(), r * t.sin(), 0.0],
+                        0.03,
+                        rgb(0x6a6e74),
+                    );
+                }
+            }
+            m.ball([0.0, 0.0, h], 0.4, rgb(0xe0442c), rgb(0xffffff));
+        }
+        TowerType::Lighting => {
+            m.cylinder(0.0, 0.0, 0.3, 0.0, h, steel, steel, 8);
+            // A frame of floodlights facing the field.
+            m.cuboid(0.0, 0.3, 3.2, 0.25, h - 1.6, h, steel, steel);
+            for row in 0..2 {
+                for col in 0..4 {
+                    let x = -1.2 + col as f64 * 0.8;
+                    let z = h - 0.5 - row as f64 * 0.8;
+                    m.ball([x, 0.5, z], 0.22, rgb(0xfff2c8), rgb(0xffffff));
+                }
+            }
+        }
+        TowerType::Belfry => {
+            // A masonry shaft, an open belfry, and a spire.
+            let w = (0.12 * h).clamp(3.0, 8.0);
+            m.cuboid(0.0, 0.0, w, w, 0.0, 0.62 * h, body, top);
+            for [x, y] in [[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]] {
+                m.cuboid(
+                    x * w * 0.4,
+                    y * w * 0.4,
+                    w * 0.2,
+                    w * 0.2,
+                    0.62 * h,
+                    0.74 * h,
+                    body,
+                    body,
+                );
+            }
+            m.cuboid(0.0, 0.0, w * 1.05, w * 1.05, 0.74 * h, 0.77 * h, top, top);
+            m.cone(0.0, 0.0, w * 0.65, 0.77 * h, h, accent, 4);
+        }
+        TowerType::Minaret => {
+            let r = (0.05 * h).clamp(1.2, 3.0);
+            m.cylinder(0.0, 0.0, r, 0.0, 0.7 * h, body, top, 12);
+            m.cylinder(0.0, 0.0, r * 1.6, 0.7 * h, 0.73 * h, top, top, 12);
+            m.cylinder(0.0, 0.0, r * 0.8, 0.73 * h, 0.85 * h, body, top, 12);
+            m.cone(0.0, 0.0, r * 0.9, 0.85 * h, h, accent, 12);
+        }
+        TowerType::Observation | TowerType::Generic => {
+            m.cylinder(0.0, 0.0, 3.0, 0.0, 0.85 * h, body, top, 12);
+            m.cylinder(0.0, 0.0, 4.2, 0.85 * h, 0.92 * h, top, top, 12);
+            m.beam([0.0, 0.0, 0.92 * h], [0.0, 0.0, h], 0.3, rgb(0x5d6168));
+        }
+    }
+}
+
 /// Builds the model of `kind`, `h` meters tall.
-fn model(kind: Kind, h: f64, c: &ObjectPaint, theme_trunk: Color) -> Mesh {
+fn model(kind: Kind, variant: u8, h: f64, c: &ObjectPaint, theme_trunk: Color) -> Mesh {
     use Kind as K;
     let mut m = Mesh::new();
     let (body, top, accent) = (c.body, c.top, c.accent);
@@ -181,11 +290,7 @@ fn model(kind: Kind, h: f64, c: &ObjectPaint, theme_trunk: Color) -> Mesh {
             m.cylinder(0.0, 0.0, 1.6, 0.0, h - 1.0, body, top, 12);
             m.cylinder(0.0, 0.0, 1.75, h - 1.0, h, shade(body, 0.8), dark, 12);
         }
-        K::Tower => {
-            m.cylinder(0.0, 0.0, 3.0, 0.0, 0.85 * h, body, top, 12);
-            m.cylinder(0.0, 0.0, 4.2, 0.85 * h, 0.92 * h, top, top, 12);
-            m.beam([0.0, 0.0, 0.92 * h], [0.0, 0.0, h], 0.3, metal);
-        }
+        K::Tower => tower(&mut m, h, variant, c),
         K::WaterTower => {
             // New York's wooden rooftop tanks: legs, a staved barrel with
             // steel hoops, and a conical roof.
@@ -437,7 +542,7 @@ impl Renderer<'_> {
         }
         let at = [ground[0], ground[1] - f.base as f64 * fr.lift_per_m];
         let c = self.theme.object(f.kind);
-        let mut m = model(f.kind, h, &c, self.theme.trunk());
+        let mut m = model(f.kind, f.variant, h, &c, self.theme.trunk());
         if f.kind == Kind::Tree && f.flags & flags::CONIFER != 0 {
             m = Mesh::new();
             tree(&mut m, h, true, &c, self.theme.trunk());

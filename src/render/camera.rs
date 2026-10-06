@@ -203,7 +203,12 @@ impl Frame {
     /// Screen depth for back-to-front painting: the lowest screen point of
     /// the feature's box on the ground.
     pub(super) fn depth(&self, f: &Feature) -> f64 {
-        let b = f.bbox.map(|v| v as f64);
+        self.box_depth(f.bbox)
+    }
+
+    /// Screen depth of a box's lowest ground point.
+    pub(super) fn box_depth(&self, bbox: [f32; 4]) -> f64 {
+        let b = bbox.map(|v| v as f64);
         [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
             .into_iter()
             .map(|(x, y)| self.c * x + self.d * y + self.by)

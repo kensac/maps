@@ -75,13 +75,19 @@ impl Scene {
     pub(super) fn add_features(&mut self, fr: &Frame, map: &Map, run: &[u32]) {
         for &id in run {
             let f = &map.features[id as usize];
-            let depth = if f.kind.is_point() {
+            let (depth, tie) = if f.kind.is_point() {
                 let p = map.ring(f.ring_start)[0];
-                fr.apply(p[0] as f64, p[1] as f64)[1]
+                (fr.apply(p[0] as f64, p[1] as f64)[1], (id as u64) << 24)
+            } else if let Some(&group) = map.groups.get(f.group as usize) {
+                // Parts of one building sort as a unit, lowest top first, so
+                // a tower rising from inside wider setbacks is painted over
+                // their roofs.
+                let top = (f.height.max(0.0) * 100.0) as u64;
+                (fr.box_depth(group), (top << 24) | id as u64 & 0xff_ffff)
             } else {
-                fr.depth(f)
+                (fr.depth(f), (id as u64) << 24)
             };
-            self.push(depth, (id as u64) << 24, Item::Feature(id));
+            self.push(depth, tie, Item::Feature(id));
         }
     }
 

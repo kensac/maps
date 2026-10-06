@@ -30,6 +30,11 @@ pub struct Feature {
     pub base: f32,
     /// Index into [`Map::details`] for solids with roof/facade detail.
     pub detail: u32,
+    /// Model variant of a point object (e.g. a tower's type).
+    pub variant: u8,
+    /// For a `building:part`: index into [`Map::groups`], the footprint of
+    /// the building it belongs to; `u32::MAX` otherwise.
+    pub group: u32,
     /// Zoom from which the feature is drawn: its kind's minimum zoom, or the
     /// zoom at which it grows past a pixel, whichever is later.
     pub vis_zoom: f32,
@@ -60,6 +65,9 @@ pub struct Map {
     pub max_height: f32,
     /// Roof and facade detail of solids, indexed by [`Feature::detail`].
     pub details: Vec<Detail>,
+    /// Bounding boxes of buildings drawn through their parts, indexed by
+    /// [`Feature::group`]: parts of one building sort together.
+    pub groups: Vec<[f32; 4]>,
     index: Vec<RTree<Entry>>,
 }
 
@@ -72,6 +80,7 @@ struct Attrs {
     height: f32,
     base: f32,
     detail: Option<Detail>,
+    variant: u8,
 }
 
 impl Attrs {
@@ -83,6 +92,7 @@ impl Attrs {
             height,
             base,
             detail: None,
+            variant: 0,
         }
     }
 
@@ -111,6 +121,7 @@ impl Chunk {
             height,
             base,
             detail,
+            variant,
         } = a;
         let mut bbox = Rect::EMPTY;
         let ring_start = self.ring_starts.len() as u32;
@@ -133,7 +144,13 @@ impl Chunk {
         if ring_count == 0 {
             return;
         }
-        let extent = bbox.width().max(bbox.height());
+        // Tall, thin things (spires, towers) are visible by their height.
+        let tall = if kind.is_extrusion() {
+            height as f64 / crate::geo::meters_per_unit(bbox.center()[1])
+        } else {
+            0.0
+        };
+        let extent = bbox.width().max(bbox.height()).max(tall * 0.5);
         let min_px = if kind.is_area() { 1.0 } else { 1.5 };
         let size_zoom = if kind.is_point() || kind == Kind::Land {
             0.0
@@ -173,6 +190,8 @@ impl Chunk {
                 height,
                 base,
                 detail,
+                variant,
+                group: u32::MAX,
                 vis_zoom,
                 bbox: [
                     local(bbox.min_x, origin[0]),
@@ -216,12 +235,35 @@ fn contains(rings: &[&[[f32; 2]]], p: [f32; 2]) -> bool {
     inside
 }
 
+/// Whether a point object found inside a building footprint is on its roof.
+/// Bell towers, minarets and the like are part of their building and rise
+/// from the ground; antennas, masts, flagpoles and tanks stand on top.
+fn stands_on_roofs(f: &Feature) -> bool {
+    use crate::classify::TowerType;
+    match f.kind {
+        Kind::Tower => matches!(
+            TowerType::from_u8(f.variant),
+            TowerType::Generic | TowerType::Monopole | TowerType::Lattice | TowerType::Guyed
+        ),
+        Kind::Mast | Kind::Flagpole | Kind::WaterTower | Kind::Chimney | Kind::Windsock => true,
+        k => k.is_point() && !matches!(k, Kind::Tree | Kind::Shrub),
+    }
+}
+
 /// Places structures relative to each other, as mapped:
 ///
 /// - A building split into `building:part`s is drawn through its parts; its
 ///   outline (which would swallow them) is dropped.
-/// - Objects tagged `location=roof` stand on the building beneath them.
-fn place_structures(features: &mut Vec<(Feature, f32)>, points: &[[f32; 2]], starts: &[u32]) {
+/// - Objects tagged `location=roof`, and point objects mapped inside a
+///   building's footprint (antennas, flagpoles, water tanks rarely carry the
+///   tag), stand on the highest flat roof beneath them; pitched roofs and
+///   spires are not something to stand on.
+fn place_structures(
+    features: &mut Vec<(Feature, f32)>,
+    points: &[[f32; 2]],
+    starts: &[u32],
+    details: &[Detail],
+) -> Vec<[f32; 4]> {
     let rings_of = |f: &Feature| -> Vec<&[[f32; 2]]> {
         (f.ring_start..f.ring_start + f.ring_count)
             .map(|r| &points[starts[r as usize] as usize..starts[r as usize + 1] as usize])
@@ -247,43 +289,62 @@ fn place_structures(features: &mut Vec<(Feature, f32)>, points: &[[f32; 2]], sta
         })
         .collect();
     if buildings.is_empty() {
-        return;
+        return Vec::new();
     }
     let index = RTree::bulk_load(buildings);
 
-    let hidden: Vec<usize> = features
+    // (part, outline) pairs.
+    let membership: Vec<(usize, usize)> = features
         .par_iter()
-        .filter(|(f, _)| f.flags & flags::PART != 0)
-        .flat_map_iter(|(part, _)| {
+        .enumerate()
+        .filter(|(_, (f, _))| f.flags & flags::PART != 0)
+        .filter_map(|(i, (part, _))| {
             let p = anchor(part);
             index
                 .locate_all_at_point(p)
-                .filter(|e| {
+                .find(|e| {
                     let outline = &features[e.data].0;
                     outline.flags & flags::PART == 0 && contains(&rings_of(outline), p)
                 })
-                .map(|e| e.data)
-                .collect::<Vec<_>>()
+                .map(|e| (i, e.data))
         })
         .collect();
     let mut is_hidden = vec![false; features.len()];
-    for i in hidden {
-        is_hidden[i] = true;
+    let mut groups: Vec<[f32; 4]> = Vec::new();
+    let mut group_of: rustc_hash::FxHashMap<usize, u32> = Default::default();
+    for &(part, outline) in &membership {
+        is_hidden[outline] = true;
+        let g = *group_of.entry(outline).or_insert_with(|| {
+            groups.push(features[outline].0.bbox);
+            groups.len() as u32 - 1
+        });
+        features[part].0.group = g;
     }
 
     let lifts: Vec<(usize, f32)> = features
         .par_iter()
         .enumerate()
-        .filter(|(_, (f, _))| f.flags & flags::ON_ROOF != 0)
+        .filter(|(_, (f, _))| f.flags & flags::ON_ROOF != 0 || stands_on_roofs(f))
         .filter_map(|(i, (f, _))| {
             let p = anchor(f);
-            let roof = index
-                .locate_all_at_point(p)
-                .filter(|e| e.data != i && !is_hidden[e.data])
-                .map(|e| &features[e.data].0)
-                .filter(|b| contains(&rings_of(b), p))
-                .map(|b| b.height)
-                .fold(0.0_f32, f32::max);
+            let (mut flat, mut any) = (0.0_f32, 0.0_f32);
+            for e in index.locate_all_at_point(p) {
+                if e.data == i || is_hidden[e.data] {
+                    continue;
+                }
+                let b = &features[e.data].0;
+                if !contains(&rings_of(b), p) {
+                    continue;
+                }
+                any = any.max(b.height);
+                let pitched = details
+                    .get(b.detail as usize)
+                    .is_some_and(|d| d.roof != crate::classify::RoofShape::Flat);
+                if !pitched {
+                    flat = flat.max(b.height);
+                }
+            }
+            let roof = if flat > 0.0 { flat } else { any };
             (roof > 0.0).then_some((i, roof))
         })
         .collect();
@@ -298,6 +359,7 @@ fn place_structures(features: &mut Vec<(Feature, f32)>, points: &[[f32; 2]], sta
         i += 1;
         !is_hidden[i - 1]
     });
+    groups
 }
 
 /// Polygon rings are stored without the closing repeat of the first point.
@@ -378,7 +440,8 @@ impl Map {
         let points = raw.points.par_chunks(65536).map(|chunk| {
             let mut c = Chunk::default();
             for p in chunk {
-                let attrs = Attrs::new(p.kind, p.flags, 0, p.height, 0.0);
+                let mut attrs = Attrs::new(p.kind, p.flags, 0, p.height, 0.0);
+                attrs.variant = p.variant;
                 c.push(origin, attrs, &[vec![p.at]]);
             }
             c
@@ -422,7 +485,7 @@ impl Map {
             }));
         }
         ring_starts.push(map_points.len() as u32);
-        place_structures(&mut features, &map_points, &ring_starts);
+        let groups = place_structures(&mut features, &map_points, &ring_starts, &details);
         let max_height = features
             .iter()
             .filter(|(f, _)| f.kind.is_extrusion() || f.kind.is_point())
@@ -463,6 +526,7 @@ impl Map {
             features,
             max_height,
             details,
+            groups,
             index,
         };
         eprintln!(

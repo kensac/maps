@@ -398,12 +398,14 @@ fn roof_plan(
         RoofShape::Skillion => (across * 0.5) as f32,
         _ => (across.min(along) * 0.6) as f32,
     };
+    // A mapped roof height is honored in full (spires are often a whole
+    // part that is all roof); an estimated one stays modest.
     let rise = if d.roof_height > 0.0 {
-        d.roof_height
+        d.roof_height.min(wall)
     } else {
-        auto
-    };
-    let rise = rise.min(wall * 0.6).max(0.0);
+        auto.min(wall * 0.6)
+    }
+    .max(0.0);
     if rise < 0.3 {
         return None;
     }
