@@ -543,6 +543,7 @@ impl Renderer<'_> {
         let at = [ground[0], ground[1] - f.base as f64 * fr.lift_per_m];
         let c = self.theme.object(f.kind);
         let mut m = model(f.kind, f.variant, h, &c, self.theme.trunk());
+        m.turn_to(f.heading as f64);
         if f.kind == Kind::Tree && f.flags & flags::CONIFER != 0 {
             m = Mesh::new();
             tree(&mut m, h, true, &c, self.theme.trunk());

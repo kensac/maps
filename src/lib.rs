@@ -7,10 +7,12 @@
 
 pub mod assemble;
 pub mod classify;
+pub mod elevation;
 pub mod geo;
 pub mod ingest;
 pub mod map;
 pub mod output;
+pub mod place;
 pub mod render;
 pub mod server;
 pub mod style;

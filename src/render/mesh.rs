@@ -232,6 +232,27 @@ impl Mesh {
         self.prims.push(Prim::Beam { a, b, width, color });
     }
 
+    /// Turns the whole mesh to face compass `heading` (radians): models are
+    /// built facing south (+y), the side a sign face or a lamp arm is on.
+    pub(super) fn turn_to(&mut self, heading: f64) {
+        if !heading.is_finite() {
+            return;
+        }
+        let a = heading - std::f64::consts::PI;
+        let (c, s) = (a.cos(), a.sin());
+        let r = |p: &mut V3| *p = [p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2]];
+        for prim in &mut self.prims {
+            match prim {
+                Prim::Face { pts, .. } => pts.iter_mut().for_each(r),
+                Prim::Ball { center, .. } => r(center),
+                Prim::Beam { a, b, .. } => {
+                    r(a);
+                    r(b);
+                }
+            }
+        }
+    }
+
     /// Projects, culls, shades, sorts and draws the mesh anchored at screen
     /// point `at` (the anchor's ground position).
     pub(super) fn draw(self, pixmap: &mut Pixmap, fr: &Frame, at: [f64; 2]) {

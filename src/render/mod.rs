@@ -170,6 +170,7 @@ impl<'a> Renderer<'a> {
                 let top = match f.group() {
                     Group::Objects => f.height as f64,
                     Group::TransportBridges => f.layer.max(1) as f64 * METERS_PER_LAYER,
+                    Group::TransportGround if f.elev != u32::MAX => 5.0 * METERS_PER_LAYER,
                     Group::Overlays => f.height as f64,
                     _ => return false,
                 };

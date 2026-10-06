@@ -19,6 +19,9 @@ use tiny_skia::{Color, Pixmap};
 /// against their surroundings; longer ones show fewer joins.
 const CHUNK_PX: f64 = 96.0;
 
+/// A screen point with a height: `[x, y on the ground, height in pixels]`.
+pub(super) type V3 = [f64; 3];
+
 /// How a raised line stands above the ground.
 #[derive(Clone, Copy)]
 pub(super) enum Form {
@@ -27,6 +30,8 @@ pub(super) enum Form {
         /// Distance between pillars in meters.
         pillar_spacing: f64,
     },
+    /// A ramp on an embankment of the given color.
+    Ramp(Color),
     /// A vertical face (walls, hedges, fences, dams).
     Face(Color),
     /// A wire or beam strung between poles at its vertices.
@@ -36,10 +41,8 @@ pub(super) enum Form {
 pub(super) struct RaisedLine {
     pub(super) style: LineStyle,
     pub(super) form: Form,
-    /// Height of the line above the ground, in screen pixels.
-    pub(super) raise: f64,
     /// Height of its bottom (`min_height`, e.g. a parapet on a roof), in
-    /// screen pixels.
+    /// screen pixels; the top height comes with each point.
     pub(super) base: f64,
 }
 
@@ -61,7 +64,7 @@ pub(super) enum Item {
 #[derive(Default)]
 pub(super) struct Scene {
     items: Vec<(f64, u64, Item)>,
-    pub(super) points: Vec<Point>,
+    pub(super) points: Vec<V3>,
     pub(super) lines: Vec<RaisedLine>,
     seq: u64,
 }
@@ -96,7 +99,7 @@ impl Scene {
     pub(super) fn add_line(
         &mut self,
         line: RaisedLine,
-        pieces: &[(Vec<Point>, f64)],
+        pieces: &[(Vec<V3>, f64)],
         key: u32,
         per_segment: bool,
     ) {

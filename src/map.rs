@@ -32,6 +32,13 @@ pub struct Feature {
     pub detail: u32,
     /// Model variant of a point object (e.g. a tower's type).
     pub variant: u8,
+    /// Compass heading (radians) a point object's front faces; `NaN` when
+    /// it has no particular orientation.
+    pub heading: f32,
+    /// For roads and rails that leave the ground: offset into
+    /// [`Map::elevations`] of their per-vertex elevations; `u32::MAX` if they
+    /// stay on the ground.
+    pub elev: u32,
     /// For a `building:part`: index into [`Map::groups`], the footprint of
     /// the building it belongs to; `u32::MAX` otherwise.
     pub group: u32,
@@ -65,6 +72,9 @@ pub struct Map {
     pub max_height: f32,
     /// Roof and facade detail of solids, indexed by [`Feature::detail`].
     pub details: Vec<Detail>,
+    /// Per-vertex elevations (meters) of raised roads and rails, smoothed
+    /// into ramps; see [`crate::elevation`].
+    pub elevations: Vec<f32>,
     /// Bounding boxes of buildings drawn through their parts, indexed by
     /// [`Feature::group`]: parts of one building sort together.
     pub groups: Vec<[f32; 4]>,
@@ -81,6 +91,7 @@ struct Attrs {
     base: f32,
     detail: Option<Detail>,
     variant: u8,
+    heading: f32,
 }
 
 impl Attrs {
@@ -93,6 +104,7 @@ impl Attrs {
             base,
             detail: None,
             variant: 0,
+            heading: f32::NAN,
         }
     }
 
@@ -110,6 +122,7 @@ struct Chunk {
     ring_starts: Vec<u32>,
     features: Vec<(Feature, f32)>,
     details: Vec<Detail>,
+    elevations: Vec<f32>,
 }
 
 impl Chunk {
@@ -122,6 +135,7 @@ impl Chunk {
             base,
             detail,
             variant,
+            heading,
         } = a;
         let mut bbox = Rect::EMPTY;
         let ring_start = self.ring_starts.len() as u32;
@@ -191,6 +205,8 @@ impl Chunk {
                 base,
                 detail,
                 variant,
+                heading,
+                elev: u32::MAX,
                 group: u32::MAX,
                 vis_zoom,
                 bbox: [
@@ -206,6 +222,21 @@ impl Chunk {
 }
 
 /// Resolves node IDs to coordinates, dropping missing nodes and repeats.
+/// Like [`resolve`], keeping each kept node's elevation alongside.
+fn resolve_elevated(raw: &RawData, refs: &[i64], elev: &[f32]) -> (Vec<Point>, Vec<f32>) {
+    let mut pts: Vec<Point> = Vec::with_capacity(refs.len());
+    let mut out = Vec::with_capacity(refs.len());
+    for (&id, &e) in refs.iter().zip(elev) {
+        if let Some(p) = raw.node(id) {
+            if pts.last() != Some(&p) {
+                pts.push(p);
+                out.push(e);
+            }
+        }
+    }
+    (pts, out)
+}
+
 fn resolve(raw: &RawData, refs: &[i64]) -> Vec<Point> {
     let mut out: Vec<Point> = Vec::with_capacity(refs.len());
     for &id in refs {
@@ -379,11 +410,25 @@ impl Map {
             .unwrap_or(raw.node_bbox);
         let origin = [bounds.min_x, bounds.min_y];
 
-        let ways = raw.ways.par_chunks(4096).map(|chunk| {
+        // Roads and rails climb smoothly to their bridges.
+        let profiles = crate::elevation::profiles(&raw);
+        let ways = raw.ways.par_chunks(4096).enumerate().map(|(n, chunk)| {
             let mut c = Chunk::default();
-            for w in chunk {
+            for (k, w) in chunk.iter().enumerate() {
                 let attrs =
                     Attrs::new(w.kind, w.flags, w.layer, w.height, w.base).with_detail(w.detail);
+                if let Some(elev) = profiles.get(&(n * 4096 + k)) {
+                    let (pts, elev) = resolve_elevated(&raw, &w.refs, elev);
+                    if pts.len() >= 2 {
+                        let before = c.features.len();
+                        c.push(origin, attrs, &[pts]);
+                        if c.features.len() > before {
+                            c.features[before].0.elev = c.elevations.len() as u32;
+                            c.elevations.extend(elev);
+                        }
+                    }
+                    continue;
+                }
                 let pts = resolve(&raw, &w.refs);
                 if w.kind.is_area() {
                     let mut rings = [open_ring(pts)];
@@ -437,11 +482,15 @@ impl Map {
                     c
                 });
 
-        let points = raw.points.par_chunks(65536).map(|chunk| {
+        // Street furniture goes where it stands, turned the way it faces.
+        let placed = crate::place::place(&raw);
+        let points = placed.par_chunks(65536).map(|chunk| {
             let mut c = Chunk::default();
-            for p in chunk {
+            for placed in chunk {
+                let p = &placed.point;
                 let mut attrs = Attrs::new(p.kind, p.flags, 0, p.height, 0.0);
                 attrs.variant = p.variant;
+                attrs.heading = placed.heading;
                 c.push(origin, attrs, &[vec![p.at]]);
             }
             c
@@ -470,16 +519,21 @@ impl Map {
         let mut ring_starts = Vec::with_capacity(total_rings);
         let mut features = Vec::new();
         let mut details = Vec::new();
+        let mut elevations = Vec::new();
         for c in chunks {
             let (p0, r0) = (map_points.len() as u32, ring_starts.len() as u32);
-            let d0 = details.len() as u32;
+            let (d0, e0) = (details.len() as u32, elevations.len() as u32);
             map_points.extend_from_slice(&c.points);
             ring_starts.extend(c.ring_starts.iter().map(|s| s + p0));
             details.extend_from_slice(&c.details);
+            elevations.extend_from_slice(&c.elevations);
             features.extend(c.features.into_iter().map(|(mut f, area)| {
                 f.ring_start += r0;
                 if f.detail != u32::MAX {
                     f.detail += d0;
+                }
+                if f.elev != u32::MAX {
+                    f.elev += e0;
                 }
                 (f, area)
             }));
@@ -526,6 +580,7 @@ impl Map {
             features,
             max_height,
             details,
+            elevations,
             groups,
             index,
         };
@@ -536,6 +591,16 @@ impl Map {
             t.elapsed()
         );
         map
+    }
+
+    /// Per-vertex elevations (meters) of a raised road or rail, if any.
+    pub fn elevations(&self, f: &Feature) -> Option<&[f32]> {
+        if f.elev == u32::MAX {
+            return None;
+        }
+        let start = f.elev as usize;
+        let n = self.rings(f).map(<[_]>::len).sum::<usize>();
+        self.elevations.get(start..start + n)
     }
 
     /// Roof and facade detail of a solid, if mapped.

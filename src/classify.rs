@@ -56,6 +56,7 @@ pub struct Tags<'a> {
     pub roof_orientation: Option<&'a str>,
     pub building_colour: Option<&'a str>,
     pub tower_type: Option<&'a str>,
+    pub direction: Option<&'a str>,
     pub tower_construction: Option<&'a str>,
     pub kind: Option<&'a str>,
 }
@@ -114,6 +115,9 @@ impl<'a> Tags<'a> {
                 "roof:orientation" => &mut t.roof_orientation,
                 "building:colour" | "building:color" | "colour" => &mut t.building_colour,
                 "tower:type" => &mut t.tower_type,
+                "direction" | "traffic_signals:direction" | "traffic_sign:direction" => {
+                    &mut t.direction
+                }
                 "tower:construction" => &mut t.tower_construction,
                 "type" => &mut t.kind,
                 _ => continue,
@@ -233,6 +237,44 @@ impl<'a> Tags<'a> {
                     .map(|l| l * 3.2)
             })
             .unwrap_or(0.0)
+    }
+}
+
+/// Which way a roadside object faces, as mapped.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Facing {
+    #[default]
+    Unknown,
+    /// Applies to traffic travelling along the way's direction.
+    Forward,
+    /// Applies to traffic travelling against the way's direction.
+    Backward,
+    /// Faces a compass bearing, in degrees clockwise from north.
+    Bearing(f32),
+}
+
+impl Tags<'_> {
+    /// The mapped `direction` of a point object.
+    pub fn facing(&self) -> Facing {
+        let Some(d) = self.direction.map(str::trim) else {
+            return Facing::Unknown;
+        };
+        match d {
+            "forward" => return Facing::Forward,
+            "backward" => return Facing::Backward,
+            _ => {}
+        }
+        if let Ok(deg) = d.parse::<f32>() {
+            return Facing::Bearing(deg.rem_euclid(360.0));
+        }
+        const POINTS: [&str; 16] = [
+            "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+            "NW", "NNW",
+        ];
+        POINTS
+            .iter()
+            .position(|p| p.eq_ignore_ascii_case(d))
+            .map_or(Facing::Unknown, |i| Facing::Bearing(i as f32 * 22.5))
     }
 }
 
@@ -1245,6 +1287,16 @@ mod tests {
     }
 
     #[test]
+    fn facings() {
+        let f = |v: &str| tags(&[("direction", v)]).facing();
+        assert_eq!(f("forward"), Facing::Forward);
+        assert_eq!(f("90"), Facing::Bearing(90.0));
+        assert_eq!(f("SW"), Facing::Bearing(225.0));
+        assert_eq!(f("-90"), Facing::Bearing(270.0));
+        assert_eq!(f("sideways"), Facing::Unknown);
+    }
+
+    #[test]
     fn tower_types() {
         let v = |kv: &[(&str, &str)]| TowerType::from_u8(tags(kv).variant());
         assert_eq!(
@@ -1252,7 +1304,10 @@ mod tests {
             TowerType::Monopole
         );
         assert_eq!(
-            v(&[("man_made", "tower"), ("tower:construction", "guyed_lattice")]),
+            v(&[
+                ("man_made", "tower"),
+                ("tower:construction", "guyed_lattice")
+            ]),
             TowerType::Guyed
         );
         assert_eq!(

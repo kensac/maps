@@ -61,7 +61,7 @@
 <div class="panel controls">
   <button id="zin" title="Zoom in">+</button>
   <button id="zout" title="Zoom out">−</button>
-  <button id="compass" title="Reset north and tilt">
+  <button id="compass" title="Face north">
     <svg viewBox="0 0 24 24"><path d="M12 2l4 10h-8z" fill="#e0604a"/><path d="M12 22l-4-10h8z" fill="currentColor" opacity=".45"/></svg>
   </button>
   <button id="tilt" title="Toggle tilt" style="font-size:12px;font-weight:600">3D</button>
@@ -126,13 +126,17 @@ function inverse(b, p, x, y) {
 // gesturing; an exact affine CSS matrix covers the difference for the ground.
 const layers = [];
 let active = null;
-let settled = { bearing: 0, pitch: 45 }, settleTimer = 0;
+let settled = { bearing: 0, pitch: 45 }, settleTimer = 0, moving = false;
+// While the camera turns, tiles stream in every few degrees; at rest they
+// match the camera to the degree.
+const TURN_STEP = 3, PITCH_STEP = 5;
 
 function styleKey() { return style.theme + (style.flat ? "-flat" : ""); }
 function wantedKey() {
   const tz = clamp(Math.round(view.z), 0, MAXZ);
-  return { style: styleKey(), tb: ((Math.round(settled.bearing) % 360) + 360) % 360,
-           tp: clamp(Math.round(settled.pitch / 5) * 5, 0, MAXP), tz };
+  const step = moving ? TURN_STEP : 1;
+  const tb = ((Math.round(view.bearing / step) * step % 360) + 360) % 360;
+  return { style: styleKey(), tb, tp: clamp(Math.round(view.pitch / PITCH_STEP) * PITCH_STEP, 0, MAXP), tz };
 }
 function makeLayer(k) {
   const el = document.createElement("div");
@@ -259,13 +263,15 @@ function saveHash() {
       `${view.bearing.toFixed(1)}/${view.pitch.toFixed(0)}`);
   }, 250);
 }
-// Rotation and tilt render new tile grids; wait until the camera rests.
+// Rotation and tilt render new tile grids continuously (coarser while the
+// camera is turning); once it rests, tiles match it exactly.
 function changedOrientation() {
+  moving = true;
   clearTimeout(settleTimer);
   settleTimer = setTimeout(() => {
-    settled = { bearing: view.bearing, pitch: view.pitch };
+    moving = false;
     request();
-  }, 140);
+  }, 160);
 }
 
 // ---- Camera math --------------------------------------------------------
@@ -293,6 +299,40 @@ function rotateBy(db, dp) {
   changedOrientation();
   request();
 }
+// Rotates about a screen point, keeping the ground under it fixed (like
+// twisting a map under two fingers).
+function rotateAround(sx, sy, db) {
+  const before = screenToWorld(sx, sy);
+  view.bearing += db;
+  const after = screenToWorld(sx, sy);
+  view.x += before[0] - after[0]; view.y += before[1] - after[1];
+  changedOrientation();
+  request();
+}
+// Signed shortest difference between two bearings, in degrees.
+function turn(a, b) {
+  let d = (b - a) % 360;
+  if (d > 180) d -= 360; if (d < -180) d += 360;
+  return d;
+}
+// After a rotation gesture: keep turning with momentum, then snap to north
+// if the map ends up within a few degrees of it.
+const SNAP_NORTH = 7;
+function spinDown(rate) {
+  let t = performance.now();
+  const settle = () => {
+    const off = turn(0, view.bearing);
+    if (Math.abs(off) < SNAP_NORTH && Math.abs(off) > 0.01) animateTo({ bearing: 0 }, 250);
+  };
+  if (Math.abs(rate) < 0.02) return settle();
+  const step = (now) => {
+    const dt = now - t; t = now;
+    rotateBy(rate * dt, 0);
+    rate *= Math.pow(0.992, dt);
+    if (Math.abs(rate) > 0.01) inertia = requestAnimationFrame(step); else settle();
+  };
+  inertia = requestAnimationFrame(step);
+}
 let anim = 0;
 function animateTo(target, ms = 350) {
   cancelAnimationFrame(anim);
@@ -304,6 +344,7 @@ function animateTo(target, ms = 350) {
     view.z = from.z + ((target.z ?? from.z) - from.z) * e;
     view.bearing = from.bearing + db * e;
     view.pitch = from.pitch + ((target.pitch ?? from.pitch) - from.pitch) * e;
+    if (db || target.pitch !== undefined) changedOrientation();
     request();
     if (k < 1) anim = requestAnimationFrame(step); else changedOrientation();
   };
@@ -313,6 +354,10 @@ function animateTo(target, ms = 350) {
 // ---- Input --------------------------------------------------------------
 const pointers = new Map();
 let gesture = null, velocity = [0, 0], lastMove = 0, inertia = 0;
+// Rotation speed (degrees per ms) for momentum, and the twist accumulated
+// before a two-finger gesture starts rotating (so pinches do not wobble).
+let spin = 0, twist = 0, twisting = false;
+const TWIST_THRESHOLD = 12;
 mapEl.addEventListener("contextmenu", (e) => e.preventDefault());
 mapEl.addEventListener("pointerdown", (e) => {
   mapEl.setPointerCapture(e.pointerId);
@@ -320,7 +365,7 @@ mapEl.addEventListener("pointerdown", (e) => {
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   const orbit = e.button === 2 || e.ctrlKey || e.metaKey;
   gesture = pointers.size === 1 ? (orbit ? "orbit" : "pan") : "multi";
-  gesture2 = null;
+  gesture2 = null; spin = 0; twist = 0; twisting = false;
   mapEl.classList.add("dragging");
 });
 let gesture2 = null;
@@ -347,7 +392,16 @@ mapEl.addEventListener("pointermove", (e) => {
       zoomAround(after.mx, after.my, Math.log2(after.d / before.d));
       let da = (after.ang - before.ang) * 180 / Math.PI;
       if (da > 180) da -= 360; if (da < -180) da += 360;
-      rotateBy(-da, 0);
+      // Rotation engages once the fingers have twisted past a threshold.
+      if (!twisting) {
+        twist += da;
+        if (Math.abs(twist) > TWIST_THRESHOLD) { twisting = true; da = twist - Math.sign(twist) * TWIST_THRESHOLD; }
+        else da = 0;
+      }
+      if (da) {
+        rotateAround(after.mx, after.my, -da);
+        trackSpin(-da);
+      }
       panBy(after.mx - before.mx, after.my - before.my);
     }
     return;
@@ -358,17 +412,30 @@ mapEl.addEventListener("pointermove", (e) => {
     const now = performance.now(), dt = Math.max(1, now - lastMove);
     velocity = [dx / dt, dy / dt]; lastMove = now;
   } else if (gesture === "orbit") {
-    rotateBy(dx * 0.4, -dy * 0.35);
+    // Horizontal drags rotate about the center, vertical drags tilt.
+    const db = dx * 0.3;
+    rotateBy(db, -dy * 0.3);
+    trackSpin(db);
   }
 });
+let spinTime = 0;
+function trackSpin(db) {
+  const now = performance.now(), dt = Math.max(1, now - spinTime);
+  spin = 0.6 * spin + 0.4 * (db / dt);
+  spinTime = now;
+}
 function endPointer(e) {
   pointers.delete(e.pointerId);
   if (pointers.size === 0) {
     mapEl.classList.remove("dragging");
     if (gesture === "pan" && performance.now() - lastMove < 60) glide();
+    if (gesture === "orbit" || twisting) {
+      spinDown(performance.now() - spinTime < 60 ? spin : 0);
+    }
     gesture = null;
   } else if (pointers.size === 1) {
-    gesture = "pan"; gesture2 = null;
+    if (twisting) spinDown(0);
+    gesture = "pan"; gesture2 = null; twisting = false; twist = 0;
   }
 }
 mapEl.addEventListener("pointerup", endPointer);
@@ -417,11 +484,11 @@ addEventListener("keydown", (e) => {
   if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
 });
 addEventListener("resize", () => { W = innerWidth; H = innerHeight; request(); });
-addEventListener("hashchange", () => { if (readHash()) { settled = { ...view }; request(); } });
+addEventListener("hashchange", () => { if (readHash()) request(); });
 
 $("#zin").onclick = () => animateTo({ z: Math.round(view.z) + 1 });
 $("#zout").onclick = () => animateTo({ z: Math.round(view.z) - 1 });
-$("#compass").onclick = () => animateTo({ bearing: 0, pitch: 0 });
+$("#compass").onclick = () => animateTo({ bearing: 0 });
 $("#tilt").onclick = () => animateTo({ pitch: view.pitch > 10 ? 0 : 50 });
 function segmented(id, apply) {
   for (const b of document.querySelectorAll(`#${id} button`)) b.onclick = () => {
@@ -432,7 +499,6 @@ function segmented(id, apply) {
 segmented("theme", (v) => { style.theme = v; document.documentElement.dataset.theme = v; });
 segmented("mode", (v) => { style.flat = v === "flat"; });
 
-settled = { bearing: view.bearing, pitch: view.pitch };
 requestAnimationFrame(frame);
 })();
 </script>

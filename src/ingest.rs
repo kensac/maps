@@ -14,7 +14,7 @@
 //!
 //! Each pass decodes blobs on all cores.
 
-use crate::classify::{boundary_level, node_kind, way_kind, Detail, Kind, Tags};
+use crate::classify::{boundary_level, node_kind, way_kind, Detail, Facing, Kind, Tags};
 use crate::geo::{project, Point, Rect};
 use anyhow::{Context, Result};
 use osmpbf::{BlobDecode, BlobReader, BlobType, PrimitiveBlock, RelMemberType};
@@ -42,11 +42,15 @@ pub struct RawWay {
 /// A physical object mapped as a single node.
 #[derive(Clone, Copy)]
 pub struct RawPoint {
+    /// OSM node ID, to find the ways the object stands on.
+    pub id: i64,
     pub kind: Kind,
     pub flags: u8,
     /// Model variant (e.g. a tower's type).
     pub variant: u8,
     pub height: f32,
+    /// Mapped `direction`.
+    pub facing: Facing,
     pub at: Point,
 }
 
@@ -355,35 +359,41 @@ pub fn read(path: &Path) -> Result<RawData> {
             let mut cursor: Option<usize> = None;
             let mut last_id = i64::MIN;
             let mut bbox = acc.bbox.unwrap_or(Rect::EMPTY);
-            let mut visit = |id: i64, lon: f64, lat: f64, tagged: Option<(Kind, u8, u8, f32)>| {
-                let c = match cursor {
-                    Some(mut c) if id >= last_id => {
-                        while c < ids.len() && ids[c] < id {
-                            c += 1;
+            let mut visit =
+                |id: i64, lon: f64, lat: f64, tagged: Option<(Kind, u8, u8, f32, Facing)>| {
+                    let c = match cursor {
+                        Some(mut c) if id >= last_id => {
+                            while c < ids.len() && ids[c] < id {
+                                c += 1;
+                            }
+                            c
                         }
-                        c
+                        _ => ids.partition_point(|&x| x < id),
+                    };
+                    cursor = Some(c);
+                    last_id = id;
+                    let p = project(lon, lat);
+                    bbox.extend(p);
+                    if c < ids.len() && ids[c] == id {
+                        acc.hits.push((c as u32, p));
                     }
-                    _ => ids.partition_point(|&x| x < id),
+                    if let Some((kind, flags, variant, height, facing)) = tagged {
+                        acc.points.push(RawPoint {
+                            id,
+                            kind,
+                            flags,
+                            variant,
+                            height,
+                            facing,
+                            at: p,
+                        });
+                    }
                 };
-                cursor = Some(c);
-                last_id = id;
-                let p = project(lon, lat);
-                bbox.extend(p);
-                if c < ids.len() && ids[c] == id {
-                    acc.hits.push((c as u32, p));
-                }
-                if let Some((kind, flags, variant, height)) = tagged {
-                    acc.points.push(RawPoint {
-                        kind,
-                        flags,
-                        variant,
-                        height,
-                        at: p,
-                    });
-                }
-            };
             let object = |tags: Tags| {
-                node_kind(&tags).map(|k| (k, tags.flags(), tags.variant(), dimensions(k, &tags).0))
+                node_kind(&tags).map(|k| {
+                    let height = dimensions(k, &tags).0;
+                    (k, tags.flags(), tags.variant(), height, tags.facing())
+                })
             };
             for group in block.groups() {
                 for n in group.dense_nodes() {
