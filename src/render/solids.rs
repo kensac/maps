@@ -118,7 +118,7 @@ impl Renderer<'_> {
             base = base.max(top - CANOPY_SLAB);
         }
         let mpu = fr.meters_per_unit();
-        let outer = self.map.ring(f.ring_start);
+        let outer = self.map.outer_ring(f);
         // Anchor: the outer ring's vertex average, in local units.
         let n = outer.len() as f64;
         let (ax, ay) = outer

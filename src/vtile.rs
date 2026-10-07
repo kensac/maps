@@ -1008,7 +1008,7 @@ fn solid(
     id: u32,
     lod: Option<f64>,
 ) {
-    let outer = map.ring(feat.ring_start);
+    let outer = map.outer_ring(feat);
     let n = outer.len() as f64;
     let (sx, sy) = outer
         .iter()
@@ -1119,16 +1119,27 @@ fn solid(
             mesh.triangles(&mut roof_tris);
         }
         None => {
-            // A flat roof over all rings (holes as courtyards).
-            let mut flat: Vec<f64> = Vec::new();
-            let mut holes = Vec::new();
-            for (i, r) in flat_rings.iter().enumerate() {
-                if i > 0 {
-                    holes.push(flat.len() / 2);
+            // A flat roof per outline, with the courtyards inside it as holes.
+            // Outlines wind like the largest ring, courtyards the other way.
+            let area = |r: &[[f64; 2]]| signed_area2(r);
+            let largest = flat_rings
+                .iter()
+                .map(|r| area(r))
+                .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+                .unwrap_or(0.0);
+            let (outers, holes): (Vec<_>, Vec<_>) = flat_rings
+                .iter()
+                .partition(|r| (area(r) > 0.0) == (largest > 0.0));
+            for outer in outers {
+                let mut flat: Vec<f64> = outer.iter().flat_map(|p| [p[0], p[1]]).collect();
+                let mut starts = Vec::new();
+                for h in holes.iter().filter(|h| point_in_ring(h[0], outer)) {
+                    starts.push(flat.len() / 2);
+                    flat.extend(h.iter().flat_map(|p| [p[0], p[1]]));
                 }
-                flat.extend(r.iter().flat_map(|p| [p[0], p[1]]));
-            }
-            if let Ok(t) = earcutr::earcut(&flat, &holes, 2) {
+                let Ok(t) = earcutr::earcut(&flat, &starts, 2) else {
+                    continue;
+                };
                 let pt = |i: usize| [flat[i * 2], flat[i * 2 + 1], top as f64];
                 for tri in t.as_chunks::<3>().0 {
                     for &i in tri {

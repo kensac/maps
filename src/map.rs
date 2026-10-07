@@ -556,7 +556,9 @@ impl Map {
             .fold(0.0_f32, f32::max);
 
         // Draw order: by group; transport by layer; areas largest first so
-        // that small parcels sit on top of the large ones containing them.
+        // that small parcels sit on top of the large ones containing them,
+        // except water, which goes over them all (parks often extend over
+        // rivers, e.g. between piers).
         features.par_sort_by_key(|(f, area)| {
             let g = f.group();
             let layer = match g {
@@ -568,7 +570,7 @@ impl Map {
             } else {
                 f.kind as u32
             };
-            (g, layer, rank, f.kind, f.flags)
+            (g, layer, f.kind == Kind::Water, rank, f.kind, f.flags)
         });
         let features: Vec<Feature> = features.into_iter().map(|(f, _)| f).collect();
 
@@ -650,6 +652,18 @@ impl Map {
             self.ring_starts[r as usize + 1],
         );
         &self.points[a as usize..b as usize]
+    }
+
+    /// The ring with the largest area: the outline of a solid. Rings come
+    /// in assembly order, so a courtyard can come before its outline.
+    pub fn outer_ring(&self, f: &Feature) -> &[[f32; 2]] {
+        let area = |r: &[[f32; 2]]| {
+            let pts: Vec<Point> = r.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
+            signed_area2(&pts).abs()
+        };
+        self.rings(f)
+            .max_by(|a, b| area(a).total_cmp(&area(b)))
+            .unwrap_or(&[])
     }
 
     pub fn rings(&self, f: &Feature) -> impl Iterator<Item = &[[f32; 2]]> {

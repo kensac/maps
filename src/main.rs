@@ -111,7 +111,7 @@ fn parse_bbox(s: &str) -> Result<Rect, String> {
     }
 }
 
-/// A short token that changes whenever the input file or this build does,
+/// A short token that changes whenever the input file or this binary does,
 /// so tile URLs can be cached forever.
 fn data_version(path: &Path) -> Result<String> {
     use std::hash::{Hash, Hasher};
@@ -121,6 +121,11 @@ fn data_version(path: &Path) -> Result<String> {
     meta.modified().ok().hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
     maps::vtile::FORMAT.hash(&mut h);
+    // Any rebuild can change what tiles contain, so the binary counts too.
+    if let Ok(exe) = std::env::current_exe().and_then(std::fs::metadata) {
+        exe.len().hash(&mut h);
+        exe.modified().ok().hash(&mut h);
+    }
     Ok(format!("{:012x}", h.finish() & 0xffff_ffff_ffff))
 }
 
