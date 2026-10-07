@@ -165,14 +165,19 @@ The server shuts down gracefully on SIGTERM. Pushes to `main` publish
 
 ### Large extracts
 
-Building the map from an extract briefly needs more than twice the memory
-it serves with. `maps build` does that once and writes a snapshot, which
-every command accepts in place of the `.osm.pbf`:
+Building the map from an extract briefly needs about twice the memory it
+serves with. `maps build` does that once and writes a snapshot, which every
+command accepts in place of the `.osm.pbf`:
 
 | US Northeast (1.8 GB PBF, 25 M features) | From PBF | From snapshot |
 | --- | ---: | ---: |
-| Load time (M1 Pro) | 66 s | 3.5 s |
-| Peak memory | 17 GB | 5.7 GB |
+| Load time (M1 Pro) | 42 s | 3.5 s |
+| Peak memory | 12 GB | 5.7 GB |
+
+Ingest keeps the build lean: node coordinates are written once into a
+packed 32-bit fixed-point array (about 1 cm), node references become
+32-bit indices so the IDs can be freed, raw ways are released as they are
+built, and the feature sort is in place.
 
 The snapshot is 3.8 GB. Serving it uses about 5.7 GB plus the tile cache.
 

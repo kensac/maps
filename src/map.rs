@@ -126,6 +126,16 @@ struct Chunk {
 }
 
 impl Chunk {
+    /// Without spare capacity, since thousands of chunks wait together.
+    fn trimmed(mut self) -> Self {
+        self.points.shrink_to_fit();
+        self.ring_starts.shrink_to_fit();
+        self.features.shrink_to_fit();
+        self.details.shrink_to_fit();
+        self.elevations.shrink_to_fit();
+        self
+    }
+
     fn push(&mut self, origin: Point, a: Attrs, rings: &[Vec<Point>]) {
         let Attrs {
             kind,
@@ -232,7 +242,7 @@ impl Chunk {
 
 /// Resolves node IDs to coordinates, dropping missing nodes and repeats.
 /// Like [`resolve`], keeping each kept node's elevation alongside.
-fn resolve_elevated(raw: &RawData, refs: &[i64], elev: &[f32]) -> (Vec<Point>, Vec<f32>) {
+fn resolve_elevated(raw: &RawData, refs: &[u32], elev: &[f32]) -> (Vec<Point>, Vec<f32>) {
     let mut pts: Vec<Point> = Vec::with_capacity(refs.len());
     let mut out = Vec::with_capacity(refs.len());
     for (&id, &e) in refs.iter().zip(elev) {
@@ -246,7 +256,7 @@ fn resolve_elevated(raw: &RawData, refs: &[i64], elev: &[f32]) -> (Vec<Point>, V
     (pts, out)
 }
 
-fn resolve(raw: &RawData, refs: &[i64]) -> Vec<Point> {
+fn resolve(raw: &RawData, refs: &[u32]) -> Vec<Point> {
     let mut out: Vec<Point> = Vec::with_capacity(refs.len());
     for &id in refs {
         if let Some(p) = raw.node(id) {
@@ -411,7 +421,7 @@ fn open_ring(mut ring: Vec<Point>) -> Vec<Point> {
 }
 
 impl Map {
-    pub fn build(raw: RawData) -> Map {
+    pub fn build(mut raw: RawData) -> Map {
         let t = Instant::now();
         let bounds = raw
             .header_bbox
@@ -421,45 +431,54 @@ impl Map {
 
         // Roads and rails climb smoothly to their bridges.
         let profiles = crate::elevation::profiles(&raw);
-        let ways = raw.ways.par_chunks(4096).enumerate().map(|(n, chunk)| {
-            let mut c = Chunk::default();
-            for (k, w) in chunk.iter().enumerate() {
-                let attrs =
-                    Attrs::new(w.kind, w.flags, w.layer, w.height, w.base).with_detail(w.detail);
-                if let Some(elev) = profiles.get(&(n * 4096 + k)) {
-                    let (pts, elev) = resolve_elevated(&raw, &w.refs, elev);
-                    if pts.len() >= 2 {
-                        let before = c.features.len();
-                        c.push(origin, attrs, &[pts]);
-                        if c.features.len() > before {
-                            c.features[before].0.elev = c.elevations.len() as u32;
-                            c.elevations.extend(elev);
+        // Street furniture goes where it stands, turned the way it faces.
+        let placed = crate::place::place(&raw);
+        // Everything that needs all ways at once is done: take them by value
+        // so each way's node list is freed as soon as it is built.
+        let raw_ways = std::mem::take(&mut raw.ways);
+        let ways = raw_ways
+            .into_par_iter()
+            .enumerate()
+            .chunks(4096)
+            .map(|chunk| {
+                let mut c = Chunk::default();
+                for (i, w) in chunk {
+                    let attrs = Attrs::new(w.kind, w.flags, w.layer, w.height, w.base)
+                        .with_detail(w.detail.as_deref().copied());
+                    if let Some(elev) = profiles.get(&i) {
+                        let (pts, elev) = resolve_elevated(&raw, &w.refs, elev);
+                        if pts.len() >= 2 {
+                            let before = c.features.len();
+                            c.push(origin, attrs, &[pts]);
+                            if c.features.len() > before {
+                                c.features[before].0.elev = c.elevations.len() as u32;
+                                c.elevations.extend(elev);
+                            }
                         }
-                    }
-                    continue;
-                }
-                let pts = resolve(&raw, &w.refs);
-                if w.kind.is_area() {
-                    let mut rings = [open_ring(pts)];
-                    if rings[0].len() < 3 {
                         continue;
                     }
-                    orient_rings(&mut rings);
-                    c.push(origin, attrs, &rings);
-                } else if pts.len() >= 2 {
-                    c.push(origin, attrs, &[pts]);
+                    let pts = resolve(&raw, &w.refs);
+                    if w.kind.is_area() {
+                        let mut rings = [open_ring(pts)];
+                        if rings[0].len() < 3 {
+                            continue;
+                        }
+                        orient_rings(&mut rings);
+                        c.push(origin, attrs, &rings);
+                    } else if pts.len() >= 2 {
+                        c.push(origin, attrs, &[pts]);
+                    }
                 }
-            }
-            c
-        });
+                c.trimmed()
+            });
 
         let multipolygons = raw.multipolygons.par_chunks(256).map(|chunk| {
             let mut c = Chunk::default();
             for mp in chunk {
-                let members: Vec<&[i64]> = mp
+                let members: Vec<&[u32]> = mp
                     .members
                     .iter()
-                    .filter_map(|id| raw.member_ways.get(id).map(Vec::as_slice))
+                    .filter_map(|id| raw.member_ways.get(id).map(|r| &r[..]))
                     .collect();
                 let mut rings: Vec<Vec<Point>> = assemble_rings(&members)
                     .iter()
@@ -474,7 +493,7 @@ impl Map {
                     .with_detail(mp.detail);
                 c.push(origin, attrs, &rings);
             }
-            c
+            c.trimmed()
         });
 
         let boundaries =
@@ -491,8 +510,6 @@ impl Map {
                     c
                 });
 
-        // Street furniture goes where it stands, turned the way it faces.
-        let placed = crate::place::place(&raw);
         let points = placed.par_chunks(65536).map(|chunk| {
             let mut c = Chunk::default();
             for placed in chunk {
@@ -502,7 +519,7 @@ impl Map {
                 attrs.heading = placed.heading;
                 c.push(origin, attrs, &[vec![p.at]]);
             }
-            c
+            c.trimmed()
         });
 
         let build_land = || {
@@ -520,6 +537,10 @@ impl Map {
                 .collect::<Vec<Chunk>>()
         });
         chunks.push(land);
+        // The raw data is no longer needed; free it before concatenating.
+        drop(placed);
+        drop(profiles);
+        drop(raw);
 
         // Concatenate chunks, rebasing their ring and point indices.
         let total_points = chunks.iter().map(|c| c.points.len()).sum();
@@ -559,7 +580,9 @@ impl Map {
         // that small parcels sit on top of the large ones containing them,
         // except water, which goes over them all (parks often extend over
         // rivers, e.g. between piers).
-        features.par_sort_by_key(|(f, area)| {
+        // Unstable (no copy of 25 M features); ring_start is unique, so the
+        // order is still fully determined.
+        features.par_sort_unstable_by_key(|(f, area)| {
             let g = f.group();
             let layer = match g {
                 g if g.is_transport() => f.layer,
@@ -570,7 +593,15 @@ impl Map {
             } else {
                 f.kind as u32
             };
-            (g, layer, f.kind == Kind::Water, rank, f.kind, f.flags)
+            (
+                g,
+                layer,
+                f.kind == Kind::Water,
+                rank,
+                f.kind,
+                f.flags,
+                f.ring_start,
+            )
         });
         let features: Vec<Feature> = features.into_iter().map(|(f, _)| f).collect();
 

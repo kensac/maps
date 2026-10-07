@@ -33,7 +33,7 @@ pub fn deck_height(kind: Kind, layer: i8, f: u8) -> f32 {
 }
 
 #[derive(PartialEq)]
-struct Item(f64, i64);
+struct Item(f64, u32);
 
 impl Eq for Item {}
 
@@ -57,8 +57,8 @@ pub fn profiles(raw: &RawData) -> FxHashMap<usize, Vec<f32>> {
         w.kind.is_transport() && w.flags & flags::TUNNEL == 0
     };
     // Node → (way, ref index) for every node of a transport way.
-    let mut at_node: FxHashMap<i64, Vec<(u32, u32)>> = FxHashMap::default();
-    let mut height: FxHashMap<i64, f64> = FxHashMap::default();
+    let mut at_node: FxHashMap<u32, Vec<(u32, u32)>> = FxHashMap::default();
+    let mut height: FxHashMap<u32, f64> = FxHashMap::default();
     let mut heap = BinaryHeap::new();
     let mut any_deck = false;
     for (i, w) in raw.ways.iter().enumerate() {

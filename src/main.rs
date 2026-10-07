@@ -1,4 +1,9 @@
 use anyhow::{bail, Result};
+
+// Reuses and returns freed memory far better than the system allocator,
+// which keeps map builds from holding freed raw data.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use clap::{Args, Parser, Subcommand};
 use maps::geo::{unproject, Rect};
 use maps::map::Map;

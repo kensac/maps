@@ -130,15 +130,15 @@ struct OnLine {
 }
 
 pub fn place(raw: &RawData) -> Vec<Placed> {
-    let wanted: FxHashSet<i64> = raw
+    let wanted: FxHashSet<u32> = raw
         .points
         .iter()
         .filter(|p| needs_placing(p.kind))
-        .map(|p| p.id)
+        .filter_map(|p| p.node)
         .collect();
 
     // Lines through each object's node.
-    let on_lines: FxHashMap<i64, Vec<OnLine>> = raw
+    let on_lines: FxHashMap<u32, Vec<OnLine>> = raw
         .ways
         .par_iter()
         .filter(|w| {
@@ -178,7 +178,7 @@ pub fn place(raw: &RawData) -> Vec<Placed> {
         })
         .fold(
             FxHashMap::default,
-            |mut m: FxHashMap<i64, Vec<OnLine>>, (id, l)| {
+            |mut m: FxHashMap<u32, Vec<OnLine>>, (id, l)| {
                 m.entry(id).or_default().push(l);
                 m
             },
@@ -201,7 +201,7 @@ pub fn place(raw: &RawData) -> Vec<Placed> {
     let free: Vec<&RawPoint> = raw
         .points
         .iter()
-        .filter(|p| needs_placing(p.kind) && !on_lines.contains_key(&p.id))
+        .filter(|p| needs_placing(p.kind) && !p.node.is_some_and(|n| on_lines.contains_key(&n)))
         .collect();
     let cells: FxHashSet<(i64, i64)> = free
         .iter()
@@ -258,7 +258,7 @@ pub fn place(raw: &RawData) -> Vec<Placed> {
 
 fn place_one(
     p: &RawPoint,
-    on_lines: &FxHashMap<i64, Vec<OnLine>>,
+    on_lines: &FxHashMap<u32, Vec<OnLine>>,
     grid: &Grid,
     cell: impl Fn(Point) -> (i64, i64),
     out: &mut Vec<Placed>,
@@ -280,7 +280,7 @@ fn place_one(
     };
 
     let lines: Vec<&OnLine> = on_lines
-        .get(&p.id)
+        .get(&p.node.unwrap_or(u32::MAX))
         .map(|v| {
             v.iter()
                 .filter(|l| family_of_line(l.kind) == Some(family))

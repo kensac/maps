@@ -24,16 +24,27 @@ pub struct RawWay {
     pub height: f32,
     /// Bottom above the ground in meters (`min_height`).
     pub base: f32,
-    /// Roof and facade detail, for extruded solids.
-    pub detail: Option<Detail>,
-    pub refs: Vec<i64>,
+    /// Roof and facade detail, for extruded solids (boxed: most ways have
+    /// none, and there are tens of millions of ways).
+    pub detail: Option<Box<Detail>>,
+    /// Indices into [`RawData::node_xy`].
+    pub refs: Box<[u32]>,
+}
+
+/// A way as read, before node IDs become indices.
+struct PendingWay {
+    way: RawWay,
+    ids: Box<[i64]>,
 }
 
 /// A physical object mapped as a single node.
 #[derive(Clone, Copy)]
 pub struct RawPoint {
-    /// OSM node ID, to find the ways the object stands on.
+    /// OSM node ID.
     pub id: i64,
+    /// Index into [`RawData::node_xy`] if a kept way uses this node, to find
+    /// the ways the object stands on.
+    pub node: Option<u32>,
     pub kind: Kind,
     pub flags: u8,
     /// Model variant (e.g. a tower's type).
@@ -77,27 +88,39 @@ pub struct RawData {
     pub header_bbox: Option<Rect>,
     /// Bounding box of every node in the file.
     pub node_bbox: Rect,
-    /// Sorted, unique IDs of every node referenced by a kept way.
-    pub node_ids: Vec<i64>,
-    /// Projected coordinate of `node_ids[i]` (NaN when missing from the file).
-    pub node_xy: Vec<Point>,
+    /// Coordinate of every node a kept way uses, packed by [`pack`], indexed
+    /// by the node references below; [`MISSING`] when not in the file.
+    pub node_xy: Vec<u64>,
     pub ways: Vec<RawWay>,
     pub multipolygons: Vec<RawMultipolygon>,
-    /// Node refs of ways used by relations, by way ID.
-    pub member_ways: FxHashMap<i64, Vec<i64>>,
+    /// Node references of ways used by relations, by way ID.
+    pub member_ways: FxHashMap<i64, Box<[u32]>>,
     /// Ways of administrative boundaries, with the lowest admin level using them.
     pub boundary_ways: FxHashMap<i64, u8>,
-    pub coastlines: Vec<Vec<i64>>,
+    pub coastlines: Vec<Vec<u32>>,
     pub points: Vec<RawPoint>,
 }
 
 impl RawData {
     /// Coordinates of a node, or `None` if it is not in the file.
-    pub fn node(&self, id: i64) -> Option<Point> {
-        let i = self.node_ids.binary_search(&id).ok()?;
-        let p = self.node_xy[i];
-        (!p[0].is_nan()).then_some(p)
+    pub fn node(&self, i: u32) -> Option<Point> {
+        unpack(self.node_xy[i as usize])
     }
+}
+
+/// Marks a referenced node that the file does not contain.
+pub const MISSING: u64 = u64::MAX;
+const FIXED: f64 = 4294967296.0;
+
+/// A normalized coordinate as two 32-bit fixed-point halves: about 1 cm,
+/// half the memory of two f64s.
+pub fn pack([x, y]: Point) -> u64 {
+    let q = |v: f64| (v * FIXED).clamp(0.0, FIXED - 2.0) as u64;
+    q(x) << 32 | q(y)
+}
+
+pub fn unpack(v: u64) -> Option<Point> {
+    (v != MISSING).then(|| [(v >> 32) as f64 / FIXED, (v & 0xffff_ffff) as f64 / FIXED])
 }
 
 #[derive(Clone, Copy, Default)]
@@ -169,14 +192,13 @@ struct RelationPass {
 
 #[derive(Default)]
 struct WayPass {
-    ways: Vec<RawWay>,
-    members: FxHashMap<i64, Vec<i64>>,
-    coastlines: Vec<Vec<i64>>,
+    ways: Vec<PendingWay>,
+    members: FxHashMap<i64, Box<[i64]>>,
+    coastlines: Vec<Box<[i64]>>,
 }
 
 #[derive(Default)]
 struct NodePass {
-    hits: Vec<(u32, Point)>,
     points: Vec<RawPoint>,
     bbox: Option<Rect>,
 }
@@ -281,7 +303,7 @@ pub fn read(path: &Path) -> Result<RawData> {
                     if kind.is_none() && !coast && !is_member {
                         continue;
                     }
-                    let refs: Vec<i64> = w.refs().collect();
+                    let refs: Box<[i64]> = w.refs().collect();
                     if coast {
                         acc.coastlines.push(refs.clone());
                     }
@@ -290,15 +312,18 @@ pub fn read(path: &Path) -> Result<RawData> {
                     }
                     if let Some(kind) = kind {
                         let (height, base) = dimensions(kind, &tags);
-                        acc.ways.push(RawWay {
-                            id: w.id(),
-                            kind,
-                            flags: tags.flags(),
-                            layer: tags.layer(),
-                            height,
-                            base,
-                            detail: kind.is_extrusion().then(|| tags.detail()),
-                            refs,
+                        acc.ways.push(PendingWay {
+                            way: RawWay {
+                                id: w.id(),
+                                kind,
+                                flags: tags.flags(),
+                                layer: tags.layer(),
+                                height,
+                                base,
+                                detail: kind.is_extrusion().then(|| Box::new(tags.detail())),
+                                refs: Box::default(),
+                            },
+                            ids: refs,
                         });
                     }
                 }
@@ -324,7 +349,7 @@ pub fn read(path: &Path) -> Result<RawData> {
     let mut node_ids: Vec<i64> = ways
         .ways
         .par_iter()
-        .flat_map_iter(|w| w.refs.iter().copied())
+        .flat_map_iter(|w| w.ids.iter().copied())
         .chain(
             ways.members
                 .par_iter()
@@ -338,7 +363,14 @@ pub fn read(path: &Path) -> Result<RawData> {
         .collect();
     node_ids.par_sort_unstable();
     node_ids.dedup();
+    node_ids.shrink_to_fit();
     let ids = &node_ids;
+    // Each referenced node's slot is written once, from whichever thread
+    // decodes it, so no list of hits is ever held.
+    let xy: Vec<std::sync::atomic::AtomicU64> = (0..node_ids.len())
+        .map(|_| std::sync::atomic::AtomicU64::new(MISSING))
+        .collect();
+    let slots = &xy;
 
     let nodes = par_blocks(
         path,
@@ -365,11 +397,12 @@ pub fn read(path: &Path) -> Result<RawData> {
                     let p = project(lon, lat);
                     bbox.extend(p);
                     if c < ids.len() && ids[c] == id {
-                        acc.hits.push((c as u32, p));
+                        slots[c].store(pack(p), std::sync::atomic::Ordering::Relaxed);
                     }
                     if let Some((kind, flags, variant, height, facing)) = tagged {
                         acc.points.push(RawPoint {
                             id,
+                            node: None,
                             kind,
                             flags,
                             variant,
@@ -401,7 +434,6 @@ pub fn read(path: &Path) -> Result<RawData> {
             acc.bbox = Some(bbox);
         },
         |mut a, b| {
-            a.hits.extend(b.hits);
             a.points.extend(b.points);
             a.bbox = match (a.bbox, b.bbox) {
                 (Some(x), Some(y)) => Some(x.union(&y)),
@@ -410,10 +442,7 @@ pub fn read(path: &Path) -> Result<RawData> {
             a
         },
     )?;
-    let mut node_xy = vec![[f64::NAN; 2]; node_ids.len()];
-    for (i, p) in nodes.hits {
-        node_xy[i as usize] = p;
-    }
+    let node_xy: Vec<u64> = xy.into_iter().map(|a| a.into_inner()).collect();
     eprintln!(
         "  nodes: {} referenced, {} point features ({:.2?})",
         node_ids.len(),
@@ -421,9 +450,39 @@ pub fn read(path: &Path) -> Result<RawData> {
         t.elapsed()
     );
 
+    // Node IDs become indices into node_xy, and the IDs are dropped.
+    let index = |id: i64| {
+        node_ids
+            .binary_search(&id)
+            .expect("every ref was collected") as u32
+    };
+    let indices = |ids: &[i64]| -> Box<[u32]> { ids.iter().map(|&id| index(id)).collect() };
+    let mut ways_out: Vec<RawWay> = ways
+        .ways
+        .into_par_iter()
+        .map(|p| RawWay {
+            refs: indices(&p.ids),
+            ..p.way
+        })
+        .collect();
+    let member_ways: FxHashMap<i64, Box<[u32]>> = ways
+        .members
+        .into_par_iter()
+        .map(|(id, ids)| (id, indices(&ids)))
+        .collect();
+    let mut coastlines: Vec<Vec<u32>> = ways
+        .coastlines
+        .into_par_iter()
+        .map(|ids| indices(&ids).into_vec())
+        .collect();
+    let mut points = nodes.points;
+    points.par_iter_mut().for_each(|p| {
+        p.node = node_ids.binary_search(&p.id).ok().map(|i| i as u32);
+    });
+    drop(node_ids);
+
     // Blobs finish in arbitrary order; sort so output is reproducible.
-    let (mut ways_out, mut multipolygons, mut coastlines, mut points) =
-        (ways.ways, rel.multipolygons, ways.coastlines, nodes.points);
+    let mut multipolygons = rel.multipolygons;
     ways_out.par_sort_unstable_by_key(|w| w.id);
     multipolygons.par_sort_unstable_by_key(|m| m.id);
     coastlines.sort_unstable_by_key(|c| c[0]);
@@ -436,11 +495,10 @@ pub fn read(path: &Path) -> Result<RawData> {
     Ok(RawData {
         header_bbox,
         node_bbox: nodes.bbox.unwrap_or(Rect::EMPTY),
-        node_ids,
         node_xy,
         ways: ways_out,
         multipolygons,
-        member_ways: ways.members,
+        member_ways,
         boundary_ways: rel.boundary_ways,
         coastlines,
         points,

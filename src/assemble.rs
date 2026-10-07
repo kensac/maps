@@ -7,9 +7,9 @@ use rustc_hash::FxHashMap;
 /// Joins way node-ID sequences into rings by matching shared endpoints,
 /// reversing ways as needed (multipolygon members have no required direction).
 /// Rings that cannot be closed are returned open; a fill closes them implicitly.
-pub fn assemble_rings(ways: &[&[i64]]) -> Vec<Vec<i64>> {
+pub fn assemble_rings(ways: &[&[u32]]) -> Vec<Vec<u32>> {
     let mut rings = Vec::new();
-    let mut by_endpoint: FxHashMap<i64, Vec<usize>> = FxHashMap::default();
+    let mut by_endpoint: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
     let mut used = vec![false; ways.len()];
     for (i, w) in ways.iter().enumerate() {
         if w.len() < 2 {
@@ -105,9 +105,9 @@ pub fn orient_rings(rings: &mut [Vec<Point>]) {
 
 /// Joins coastline ways end-to-start into chains. Coastlines are directed
 /// (land on the left), so ways are never reversed.
-pub fn assemble_coastlines(ways: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
-    let mut by_start: FxHashMap<i64, usize> = FxHashMap::default();
-    let mut ends: rustc_hash::FxHashSet<i64> = Default::default();
+pub fn assemble_coastlines(ways: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+    let mut by_start: FxHashMap<u32, usize> = FxHashMap::default();
+    let mut ends: rustc_hash::FxHashSet<u32> = Default::default();
     for (i, w) in ways.iter().enumerate() {
         by_start.insert(w[0], i);
         ends.insert(*w.last().unwrap());
