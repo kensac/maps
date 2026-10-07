@@ -329,7 +329,13 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
         scale: 1.0,
         ppm,
     };
-    let vis = if z >= MAX_ZOOM { 30.0 } else { z as f32 + 0.5 };
+    // Low zooms take only what is meant for them; higher ones look half a
+    // zoom ahead, since a tile serves the range up to the next zoom.
+    let vis = match z {
+        MAX_ZOOM.. => 30.0,
+        12.. => z as f32 + 0.5,
+        _ => z as f32,
+    };
 
     let margin = size * 0.02;
     let area = [
@@ -347,8 +353,12 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
         crate::assemble::Background::Water => theme.water_color(),
     };
     let tile_rect = Rect::new(-0.01, -0.01, 1.01, 1.01);
-    // Simplify lower zooms: half a pixel of a 512 px tile.
-    let tolerance = if z >= MAX_ZOOM { 0.0 } else { 0.5 / 512.0 };
+    // Simplify lower zooms: half a pixel of a 512 px tile, more below z12.
+    let tolerance = match z {
+        MAX_ZOOM.. => 0.0,
+        12.. => 0.5 / 512.0,
+        _ => 1.5 / 512.0,
+    };
 
     for &id in &ids {
         let feat = &map.features[id as usize];
@@ -464,7 +474,8 @@ fn fill(
         let mut pts: Vec<Point> = ring.iter().map(|&p| tf.uv(p)).collect();
         pts = simplify(&pts, tol);
         clip_ring(&mut pts, rect, &mut tmp);
-        if pts.len() >= 3 && signed_area2(&pts).abs() > 1e-12 {
+        // Drop slivers too small to see (about a 1.4 tolerance square).
+        if pts.len() >= 3 && signed_area2(&pts).abs() > (4.0 * tol * tol).max(1e-12) {
             rings.push(pts);
         }
     }
@@ -694,6 +705,13 @@ fn line_feature(
             pts
         };
         for (piece, dist) in clip3(&pts, rect, tf.m_per_unit) {
+            let len: f64 = piece
+                .windows(2)
+                .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+                .sum();
+            if len < tol * 1.5 {
+                continue;
+            }
             let raised_kind = matches!(
                 feat.kind,
                 Kind::Hedge | Kind::Fence | Kind::Wall | Kind::LowBarrier | Kind::Dam | Kind::Weir
@@ -718,7 +736,8 @@ fn line_feature(
             if tf.solids && (top.iter().any(|p| p[2] > 0.3) && feat.kind.is_transport() || bridge) {
                 support(b, theme, tf, &top, &style, ctx.ppm, bridge, dist);
             }
-            if let Some(c) = &style.casing {
+            // Casings are invisible at a pixel or two wide.
+            if let Some(c) = style.casing.as_ref().filter(|_| ctx.zoom >= 12.0) {
                 ribbon(&mut b.casing, &top, tf, c, ctx.ppm, dist);
             }
             if let Some(l) = &style.line {

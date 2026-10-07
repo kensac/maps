@@ -16,5 +16,6 @@ pub mod output;
 pub mod place;
 pub mod render;
 pub mod server;
+pub mod snapshot;
 pub mod style;
 pub mod vtile;

@@ -564,6 +564,9 @@ struct StaticQuery {
     scale: Option<f32>,
     theme: Option<String>,
     buildings: Option<String>,
+    /// Data version from `/meta.json`; a matching one makes the render
+    /// cacheable forever, since a new version changes the URL.
+    v: Option<String>,
 }
 
 /// A PNG of the map centered on a point, at any bearing and pitch.
@@ -621,6 +624,11 @@ async fn static_map(State(api): State<Shared>, Query(q): Query<StaticQuery>) -> 
         );
     };
     let map = api.map;
+    let cache = if q.v.as_deref() == Some(api.version.as_str()) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=60"
+    };
     let (tx, rx) = oneshot::channel();
     rayon::spawn(move || {
         if tx.is_closed() {
@@ -634,7 +642,7 @@ async fn static_map(State(api): State<Shared>, Query(q): Query<StaticQuery>) -> 
     match rx.await {
         Ok(Ok((png, took))) => Response::builder()
             .header(header::CONTENT_TYPE, "image/png")
-            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .header(header::CACHE_CONTROL, cache)
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(
                 "server-timing",

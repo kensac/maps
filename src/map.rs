@@ -572,13 +572,7 @@ impl Map {
         });
         let features: Vec<Feature> = features.into_iter().map(|(f, _)| f).collect();
 
-        let mut buckets: Vec<Vec<Entry>> = (0..=MAX_BUCKET).map(|_| Vec::new()).collect();
-        for (i, f) in features.iter().enumerate() {
-            let b = (f.vis_zoom.max(0.0) as usize).min(MAX_BUCKET);
-            let r = Rectangle::from_corners([f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[3]]);
-            buckets[b].push(GeomWithData::new(r, i as u32));
-        }
-        let index = buckets.into_par_iter().map(RTree::bulk_load).collect();
+        let index = build_index(&features);
 
         let map = Map {
             bounds,
@@ -600,6 +594,36 @@ impl Map {
             t.elapsed()
         );
         map
+    }
+
+    /// A map from its parts, as read back from a snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        bounds: Rect,
+        origin: Point,
+        background: Background,
+        points: Vec<[f32; 2]>,
+        ring_starts: Vec<u32>,
+        features: Vec<Feature>,
+        max_height: f32,
+        details: Vec<Detail>,
+        elevations: Vec<f32>,
+        groups: Vec<[f32; 4]>,
+    ) -> Map {
+        let index = build_index(&features);
+        Map {
+            bounds,
+            origin,
+            background,
+            points,
+            ring_starts,
+            features,
+            max_height,
+            details,
+            elevations,
+            groups,
+            index,
+        }
     }
 
     /// Per-vertex elevations (meters) of a raised road or rail, if any.
@@ -658,4 +682,16 @@ impl Map {
         v.sort_by_key(|a| std::cmp::Reverse(a.1));
         v
     }
+}
+
+/// One R-tree per zoom bucket: a feature lives in the bucket of the zoom it
+/// appears at, so a query walks only the buckets up to its zoom.
+fn build_index(features: &[Feature]) -> Vec<RTree<Entry>> {
+    let mut buckets: Vec<Vec<Entry>> = (0..=MAX_BUCKET).map(|_| Vec::new()).collect();
+    for (i, f) in features.iter().enumerate() {
+        let b = (f.vis_zoom.max(0.0) as usize).min(MAX_BUCKET);
+        let r = Rectangle::from_corners([f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[3]]);
+        buckets[b].push(GeomWithData::new(r, i as u32));
+    }
+    buckets.into_par_iter().map(RTree::bulk_load).collect()
 }

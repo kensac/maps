@@ -55,7 +55,7 @@ enum Command {
     },
     /// Serve the map over HTTP, rendering tiles in real time.
     Serve {
-        /// Input .osm.pbf file.
+        /// Input .osm.pbf file or map snapshot.
         input: PathBuf,
         /// Address to listen on.
         #[arg(long, default_value = "0.0.0.0:8080")]
@@ -64,6 +64,15 @@ enum Command {
         #[arg(long, default_value_t = 1024)]
         cache_mb: u64,
     },
+    /// Build the map once and save it as a snapshot that every command
+    /// loads in seconds, with less memory than building from the extract.
+    Build {
+        /// Input .osm.pbf file.
+        input: PathBuf,
+        /// Output snapshot path.
+        #[arg(short, long, default_value = "map.snap")]
+        output: PathBuf,
+    },
     /// Exit 0 if a local server answers /healthz (for container healthchecks).
     Check {
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -71,14 +80,14 @@ enum Command {
     },
     /// Print statistics about an extract.
     Info {
-        /// Input .osm.pbf file.
+        /// Input .osm.pbf file or map snapshot.
         input: PathBuf,
     },
 }
 
 #[derive(Args)]
 struct Common {
-    /// Input .osm.pbf file.
+    /// Input .osm.pbf file or map snapshot.
     input: PathBuf,
     /// Color theme.
     #[arg(short, long, value_enum, default_value_t)]
@@ -121,7 +130,11 @@ fn load(path: &Path) -> Result<Map> {
     }
     let t = Instant::now();
     eprintln!("loading {}", path.display());
-    let map = Map::build(maps::ingest::read(path)?);
+    let map = if maps::snapshot::is_snapshot(path) {
+        maps::snapshot::load(path)?
+    } else {
+        Map::build(maps::ingest::read(path)?)
+    };
     eprintln!("loaded in {:.2?}", t.elapsed());
     Ok(map)
 }
@@ -189,6 +202,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Check { addr } => check(addr),
+        Command::Build { input, output } => maps::snapshot::save(&load(&input)?, &output),
         Command::Info { input } => {
             let map = load(&input)?;
             let (w, n) = unproject([map.bounds.min_x, map.bounds.min_y]);

@@ -96,6 +96,10 @@ cargo build --release
 
 # Feature counts and bounds
 ./target/release/maps info nyc.osm.pbf
+
+# Build once into a snapshot; every command loads it in seconds
+./target/release/maps build us-northeast.osm.pbf -o northeast.snap
+./target/release/maps serve northeast.snap
 ```
 
 In the viewer, drag to pan and scroll to zoom. Right-drag or Ctrl+drag
@@ -119,7 +123,7 @@ Extracts for any region are available from
 | `/v1/features/{id}` | One feature |
 | `/v1/lookup?lat=&lon=&radius=` | What is at a point, tallest first |
 | `/v1/tallest?bbox=` | Tallest structures in a box |
-| `/v1/static.png?lat=&lon=&zoom=&bearing=&pitch=` | A 3D render as PNG (`/v1/static` also works) |
+| `/v1/static.png?lat=&lon=&zoom=&bearing=&pitch=&v=` | A 3D render as PNG; with `v` (the data version) it is cached forever (`/v1/static` also works) |
 
 Features carry real attributes: `height_m`, `min_height_m`, `roof_shape`,
 `levels`, colours, `heading_deg` for street furniture, and a third
@@ -158,6 +162,19 @@ Endpoints:
 
 The server shuts down gracefully on SIGTERM. Pushes to `main` publish
 `ghcr.io/kensac/maps` (`latest` and `sha-<short>`).
+
+### Large extracts
+
+Building the map from an extract briefly needs more than twice the memory
+it serves with. `maps build` does that once and writes a snapshot, which
+every command accepts in place of the `.osm.pbf`:
+
+| US Northeast (1.8 GB PBF, 25 M features) | From PBF | From snapshot |
+| --- | ---: | ---: |
+| Load time (M1 Pro) | 66 s | 3.5 s |
+| Peak memory | 17 GB | 5.7 GB |
+
+The snapshot is 3.8 GB. Serving it uses about 5.7 GB plus the tile cache.
 
 ## Performance
 

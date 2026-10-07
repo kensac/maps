@@ -5,3 +5,4 @@
 /tiles
 .DS_Store
 .vscode
+*.snap
