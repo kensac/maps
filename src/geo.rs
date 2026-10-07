@@ -180,7 +180,7 @@ pub struct Piece {
     pub distance: f64,
 }
 
-/// Liang–Barsky: the parametric interval of segment `a→b` inside `r`.
+/// Liang-Barsky: the parametric interval of segment `a→b` inside `r`.
 fn clip_segment(a: Point, b: Point, r: &Rect) -> Option<(f64, f64)> {
     let d = [b[0] - a[0], b[1] - a[1]];
     let mut t0 = 0.0_f64;
@@ -253,7 +253,7 @@ pub fn clip_polyline(line: &[Point], rect: &Rect, out: &mut Vec<Point>, pieces: 
     pieces.extend(open);
 }
 
-/// Sutherland–Hodgman: clips a closed ring to `rect` in place, using `scratch`
+/// Sutherland-Hodgman: clips a closed ring to `rect` in place, using `scratch`
 /// as a temporary buffer. Winding direction is preserved, so the result still
 /// composes correctly under a non-zero fill rule.
 pub fn clip_ring(ring: &mut Vec<Point>, rect: &Rect, scratch: &mut Vec<Point>) {

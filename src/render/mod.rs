@@ -1,28 +1,17 @@
 //! Draws a viewport of a [`Map`] into a pixmap.
 //!
-//! Per viewport: query the zoom-bucketed index, walk the (pre-sorted) features
-//! in runs that share a draw group and layer, batch consecutive features with
-//! identical style into one path, and rasterize with anti-aliasing. Geometry is
-//! projected, decimated to sub-pixel tolerance and clipped to the viewport
-//! (plus a margin for stroke width) before it reaches the rasterizer, so huge
-//! polygons cost little in tiles that only see a corner of them.
-//!
-//! In a tilted view, everything on the ground is painted first; everything
-//! that stands above it (buildings, solids, objects, decks, walls, wires) goes
-//! into a [`scene::Scene`] painted back to front, so nearer and taller things
-//! hide what is behind them.
-//!
-//! Modules: [`camera`] (view transform), `areas`, `lines`, `solids`, `props`
-//! and `scene`.
+//! Features are queried per zoom bucket, batched by style, simplified and
+//! clipped before rasterizing. In tilted views the ground draws first, then
+//! a [`scene::Scene`] of raised things painted back to front.
 
 mod areas;
 pub mod camera;
 mod lines;
-mod mesh;
-mod models;
+pub(crate) mod mesh;
+pub(crate) mod models;
 mod paint;
 mod scene;
-mod solids;
+pub(crate) mod solids;
 
 pub use camera::Viewport;
 

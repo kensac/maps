@@ -1,14 +1,7 @@
 //! Line features: roads, rail, waterways and overlays.
 //!
-//! Lines on the ground draw immediately. In 3D views, lines that stand above
-//! the ground become scene chunks, painted in depth order with everything
-//! else that has height. Every raised line carries a height per vertex:
-//! - bridges and viaducts are decks on pillars, and the roads and rails
-//!   leading up to them are ramps on embankments, following the smoothed
-//!   profiles from [`crate::elevation`] (no steps at abutments);
-//! - walls, hedges, fences and dams are vertical faces topped by their line;
-//! - power lines, aerial tramways and gantries are strung between poles;
-//! - tree rows become individual trees.
+//! Ground lines draw directly. Raised lines (decks, ramps, walls, wires, tree
+//! rows) become scene chunks with a height per vertex.
 
 use super::camera::Frame;
 use super::paint::{paint, push_ring, stroke_pieces, stroke_pieces_with, LineGeom};
@@ -117,7 +110,7 @@ fn curtain(pixmap: &mut Pixmap, pts: &[V3], bottom: f64, color: Color) {
     }
 }
 
-/// Liang–Barsky clipping of a polyline with a height per vertex; heights
+/// Liang-Barsky clipping of a polyline with a height per vertex; heights
 /// are interpolated at cut points. Returns pieces with their start distance.
 fn clip_raised(pts: &[V3], rect: &Rect) -> Vec<(Vec<V3>, f64)> {
     let mut out: Vec<(Vec<V3>, f64)> = Vec::new();

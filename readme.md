@@ -17,12 +17,16 @@ pyramid offline.
 
 ## Features
 
-**Real-time server**
-- `maps serve` keeps the map in memory and renders tiles on request. It
-  ships with a viewer that pans, zooms, rotates and tilts with mouse, touch
-  and keyboard.
-- Rotation and tilt are served as tiles too, so they stay cacheable,
-  parallel and seamless.
+**WebGL client, like Google Maps**
+- `maps serve` keeps the map in memory and builds geometry tiles on
+  request: styled, triangulated ground, road ribbons, buildings and model
+  instances (`src/vtile.rs`).
+- The browser draws every frame itself with WebGL2 and a perspective
+  camera, so pan, zoom, rotate and tilt are smooth at 60 fps.
+- Tiles load by distance (near tiles at full detail, far ones coarser) and
+  fall back to parent tiles while loading.
+- Material 3 controls, light and dark themes.
+- The server-rendered raster viewer is still available at `/raster`.
 
 **True 3D, painted in depth order**
 - Buildings and `building:part`s rise from their mapped `min_height` to their
@@ -87,7 +91,7 @@ cargo build --release
 ```
 
 In the viewer, drag to pan and scroll to zoom. Right-drag or Ctrl+drag
-rotates and tilts. On touch screens, pinch to zoom, twist to rotate and
+rotates and tilts; Shift+drag tilts. On touch screens, pinch to zoom, twist to rotate and
 swipe two fingers vertically to tilt. The URL hash
 (`#zoom/lat/lon/bearing/pitch`) is shareable.
 
@@ -110,8 +114,11 @@ Endpoints:
 
 | Path | Purpose |
 | --- | --- |
-| `/` | The viewer |
+| `/` | WebGL viewer |
+| `/raster` | Raster viewer (server-rendered tiles) |
 | `/meta.json` | Bounds, styles, data version |
+| `/geo/{version}/{theme}/{z}/{x}/{y}.bin` | Geometry tiles (gzip) |
+| `/models/{version}/{theme}.bin` | Model templates for instances |
 | `/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{y}[@2x].png` | Tiles. Immutable and cacheable forever, because `version` changes with the data. |
 | `/health` | Liveness probe (`ok`) |
 | `/metrics` | Prometheus counters: requests, cache hits, renders, render time, cache size |
@@ -178,6 +185,12 @@ regular tile grid.
   `mesh.rs`) and raised line chunks (`lines.rs`).
 - The paint order is a pure function of geometry and camera, so tiles agree
   at their edges.
+
+**Geometry tiles** (`src/vtile.rs`) reuse the same styling and 3D models
+but emit vertex buffers instead of pixels: earcut fills, mitered line
+ribbons with per-vertex height, building meshes with roofs, and instances
+of shared model templates. Detail drops with zoom (solids from z15, street
+objects from z16).
 
 **Serving** (`src/server.rs`):
 - Tokio and axum handle HTTP; rendering runs on the rayon CPU pool.

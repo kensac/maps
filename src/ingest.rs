@@ -1,18 +1,8 @@
-//! Parallel `.osm.pbf` reader.
+//! Parallel `.osm.pbf` reader, in three passes over the blobs:
 //!
-//! PBF files store nodes, then ways, then relations, but multipolygon member
-//! ways are often untagged and only identifiable through their relation, and
-//! ways reference nodes that came earlier. Rather than holding every node of
-//! the file in memory, ingest runs three passes over the compressed blobs:
-//!
-//! 1. **Relations** — find multipolygons and boundaries and the ways they use.
-//!    This pass also records which blobs hold ways and which hold nodes.
-//! 2. **Ways** — keep renderable ways, coastlines and relation members, as node
-//!    ID lists. Node blobs are skipped without being decompressed.
-//! 3. **Nodes** — look up coordinates only for the node IDs collected in pass
-//!    2, plus tagged point features. Way blobs are skipped.
-//!
-//! Each pass decodes blobs on all cores.
+//! 1. Relations: multipolygons, boundaries and their member ways.
+//! 2. Ways: renderable ways as node ID lists (node blobs skipped).
+//! 3. Nodes: coordinates for the collected IDs plus tagged points.
 
 use crate::classify::{boundary_level, node_kind, way_kind, Detail, Facing, Kind, Tags};
 use crate::geo::{project, Point, Rect};

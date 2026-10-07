@@ -37,7 +37,7 @@ enum Command {
         /// Compass bearing at the top of the image, in degrees clockwise.
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         bearing: f64,
-        /// Camera angle from straight down, 0–60 degrees.
+        /// Camera angle from straight down, 0 to 60 degrees.
         #[arg(long, default_value_t = 45.0)]
         pitch: f64,
     },
@@ -191,7 +191,7 @@ fn main() -> Result<()> {
             println!("features    {}", map.features.len());
             println!("vertices    {}", map.points.len());
             for z in [12, 14, 16, 18] {
-                println!("tiles z0–{z:<2} {}", count_tiles(&map.bounds, 0, z));
+                println!("tiles z0 to {z:<2} {}", count_tiles(&map.bounds, 0, z));
             }
             println!();
             for (kind, count) in map.stats() {

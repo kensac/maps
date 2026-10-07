@@ -1,24 +1,11 @@
 //! Real-time tile server.
 //!
-//! The map is loaded once and kept in memory; every tile is rendered on demand.
-//! The pieces that keep it fast under load:
-//!
-//! - **Separate pools.** A small tokio runtime handles HTTP; rendering runs on
-//!   the rayon pool sized to the CPU, so slow renders never stall the network.
-//! - **Shared cache with coalescing.** Encoded tiles live in a size-bounded
-//!   concurrent cache; concurrent requests for the same tile wait on a single
-//!   render instead of each starting one.
-//! - **Abandoned work is skipped.** If every client waiting on a tile has gone
-//!   (say, it panned away), its render is dropped before it starts.
-//! - **Bounded concurrency.** A semaphore caps renders in flight, so overload
-//!   queues requests rather than piling up memory.
-//! - **Cheap misses.** Tiles that cannot contain data are a shared,
-//!   pre-encoded transparent image, and render buffers are reused per thread.
-//! - **Immutable URLs.** Tile URLs embed a data version, so browsers and CDNs
-//!   may cache them forever.
-//!
-//! Rotation and tilt are served as tiles too: `bearing` and `pitch` select a
-//! grid laid over the camera's screen plane (see [`Viewport::camera_tile`]).
+//! - HTTP on a small tokio runtime, rendering on the rayon pool.
+//! - Size-bounded cache; concurrent requests for a tile share one render.
+//! - Renders whose clients all left are skipped.
+//! - A semaphore caps renders in flight.
+//! - Empty tiles are a shared pre-encoded image.
+//! - URLs embed a data version so responses cache forever.
 
 use crate::geo::unproject;
 use crate::map::Map;
@@ -40,7 +27,8 @@ use std::time::Instant;
 use tiny_skia::Pixmap;
 use tokio::sync::{oneshot, Semaphore};
 
-const APP: &str = include_str!("web/app.html");
+const VIEWER: &str = include_str!("web/gl.html");
+const RASTER_VIEWER: &str = include_str!("web/raster.html");
 /// Highest zoom the server renders natively; the viewer overzooms beyond it.
 pub const MAX_ZOOM: u8 = 20;
 const MAX_SCALE: u8 = 3;
@@ -88,11 +76,22 @@ struct Metrics {
     skipped: AtomicU64,
 }
 
+/// A geometry tile for the WebGL viewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct GeoKey {
+    theme: ThemeName,
+    z: u8,
+    x: u32,
+    y: u32,
+}
+
 struct App {
     map: &'static Map,
     version: String,
     meta: String,
     cache: moka::future::Cache<TileKey, Bytes>,
+    geo_cache: moka::future::Cache<GeoKey, Bytes>,
+    templates: [OnceLock<Bytes>; 2],
     permits: Semaphore,
     empty: [OnceLock<Bytes>; MAX_SCALE as usize],
     metrics: Metrics,
@@ -162,9 +161,11 @@ impl App {
             .clone()
     }
 
-    /// Renders on the rayon pool, skipping the work if nobody is waiting
-    /// for the result anymore by the time a worker picks it up.
-    async fn render(self: Arc<Self>, key: TileKey) -> Result<Bytes, String> {
+    /// Runs `work` on the rayon pool. Skipped if no one is waiting anymore.
+    async fn on_pool<F>(self: Arc<Self>, work: F) -> Result<Bytes, String>
+    where
+        F: FnOnce(&App) -> Result<Vec<u8>> + Send + 'static,
+    {
         let _permit = self.permits.acquire().await.map_err(|e| e.to_string())?;
         let (tx, rx) = oneshot::channel();
         let app = self.clone();
@@ -174,7 +175,7 @@ impl App {
                 return;
             }
             let t = Instant::now();
-            let result = render_tile(app.map, key).map(Bytes::from);
+            let result = work(&app).map(Bytes::from);
             app.metrics
                 .render_nanos
                 .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -182,6 +183,10 @@ impl App {
             let _ = tx.send(result.map_err(|e| format!("{e:#}")));
         });
         rx.await.map_err(|_| "render cancelled".to_string())?
+    }
+
+    async fn render(self: Arc<Self>, key: TileKey) -> Result<Bytes, String> {
+        self.on_pool(move |app| render_tile(app.map, key)).await
     }
 }
 
@@ -246,7 +251,7 @@ async fn tile(
     }
 }
 
-async fn index() -> impl IntoResponse {
+fn page(html: &'static str) -> impl IntoResponse {
     (
         [
             (
@@ -255,8 +260,82 @@ async fn index() -> impl IntoResponse {
             ),
             (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
-        APP,
+        html,
     )
+}
+
+fn binary(bytes: Bytes, immutable: bool) -> Response {
+    let cache_control = if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=60"
+    };
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_ENCODING, "gzip")
+        .header(header::CACHE_CONTROL, cache_control)
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::from(bytes))
+        .expect("valid response")
+}
+
+fn parse_theme(s: &str) -> Option<ThemeName> {
+    match s {
+        "light" => Some(ThemeName::Light),
+        "dark" => Some(ThemeName::Dark),
+        _ => None,
+    }
+}
+
+/// `/geo/{version}/{theme}/{z}/{x}/{y}.bin`: a geometry tile.
+async fn geo(
+    State(app): State<Shared>,
+    Path((version, theme, z, x, file)): Path<(String, String, u8, u32, String)>,
+) -> Response {
+    let y = file
+        .strip_suffix(".bin")
+        .and_then(|y| y.parse::<u32>().ok());
+    let (Some(theme), Some(y)) = (parse_theme(&theme), y) else {
+        return (StatusCode::NOT_FOUND, "unknown tile").into_response();
+    };
+    if z > crate::vtile::MAX_ZOOM || x >> z != 0 || y >> z != 0 {
+        return (StatusCode::NOT_FOUND, "tile out of range").into_response();
+    }
+    app.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let key = GeoKey { theme, z, x, y };
+    let immutable = version == app.version;
+    if let Some(bytes) = app.geo_cache.get(&key).await {
+        app.metrics.hits.fetch_add(1, Ordering::Relaxed);
+        return binary(bytes, immutable);
+    }
+    let work = app.clone().on_pool(move |app| {
+        Ok(crate::vtile::build(
+            app.map,
+            key.theme.theme(),
+            key.z,
+            key.x,
+            key.y,
+        ))
+    });
+    match app.geo_cache.try_get_with(key, work).await {
+        Ok(bytes) => binary(bytes, immutable),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `/models/{version}/{theme}.bin`: object model templates.
+async fn models(
+    State(app): State<Shared>,
+    Path((version, file)): Path<(String, String)>,
+) -> Response {
+    let Some(theme) = file.strip_suffix(".bin").and_then(parse_theme) else {
+        return (StatusCode::NOT_FOUND, "unknown theme").into_response();
+    };
+    let slot = &app.templates[theme as usize];
+    let bytes = slot
+        .get_or_init(|| Bytes::from(crate::vtile::templates(theme.theme())))
+        .clone();
+    binary(bytes, version == app.version)
 }
 
 async fn meta(State(app): State<Shared>) -> impl IntoResponse {
@@ -300,9 +379,10 @@ fn meta_json(map: &Map, version: &str) -> String {
     let (west, north) = unproject([map.bounds.min_x, map.bounds.min_y]);
     let (east, south) = unproject([map.bounds.max_x, map.bounds.max_y]);
     let (lon, lat) = unproject(map.bounds.center());
+    let geo = crate::vtile::MAX_ZOOM;
     format!(
         "{{\"version\":\"{version}\",\"bounds\":[{west},{south},{east},{north}],\
-         \"center\":[{lon},{lat}],\"maxZoom\":{MAX_ZOOM},\"maxPitch\":{MAX_PITCH},\"maxScale\":{MAX_SCALE},\
+         \"center\":[{lon},{lat}],\"maxZoom\":{MAX_ZOOM},\"geoMaxZoom\":{geo},\"maxPitch\":{MAX_PITCH},\"maxScale\":{MAX_SCALE},\
          \"styles\":[\"light\",\"dark\",\"light-flat\",\"dark-flat\"]}}"
     )
 }
@@ -339,14 +419,22 @@ pub fn serve(map: Map, opts: ServeOptions) -> Result<()> {
         version: opts.version,
         cache: moka::future::Cache::builder()
             .weigher(|_: &TileKey, v: &Bytes| v.len().try_into().unwrap_or(u32::MAX))
-            .max_capacity(opts.cache_bytes)
+            .max_capacity(opts.cache_bytes / 2)
             .build(),
+        geo_cache: moka::future::Cache::builder()
+            .weigher(|_: &GeoKey, v: &Bytes| v.len().try_into().unwrap_or(u32::MAX))
+            .max_capacity(opts.cache_bytes / 2)
+            .build(),
+        templates: Default::default(),
         permits: Semaphore::new(cpus * 4),
         empty: Default::default(),
         metrics: Metrics::default(),
     });
     let router = Router::new()
-        .route("/", get(index))
+        .route("/", get(|| async { page(VIEWER) }))
+        .route("/raster", get(|| async { page(RASTER_VIEWER) }))
+        .route("/geo/{version}/{theme}/{z}/{x}/{file}", get(geo))
+        .route("/models/{version}/{file}", get(models))
         .route("/meta.json", get(meta))
         .route("/health", get(|| async { "ok" }))
         .route("/metrics", get(metrics))

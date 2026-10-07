@@ -106,7 +106,7 @@ pub fn write_tiles(
     ensure!(max_zoom <= 22, "zoom levels above 22 are not supported");
     let total = count_tiles(&map.bounds, min_zoom, max_zoom);
     eprintln!(
-        "rendering {total} tiles, z{min_zoom}–z{max_zoom}, into {}",
+        "rendering {total} tiles, z{min_zoom} to z{max_zoom}, into {}",
         dir.display()
     );
     let started = Instant::now();

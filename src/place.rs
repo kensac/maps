@@ -1,23 +1,12 @@
-//! Street furniture placement: puts roadside objects where they actually
-//! stand and turns them the way they face.
+//! Street furniture placement and heading.
 //!
-//! OSM maps traffic controls on the road's centerline node and most other
-//! furniture as a free node beside the road. Drawn in 3D, a stop sign in the
-//! middle of the road or a bench facing a wall looks wrong, so:
+//! - Stop/yield signs and mid-block signals go to the right-hand curb of the
+//!   traffic they control and face it.
+//! - Signals on a junction node become one pole per approach.
+//! - Objects on a road move to its curb; poles turn across their line.
+//! - Objects beside a road face the nearest one.
 //!
-//! - **Stop/yield signs and mid-block signals** move to the right-hand curb of
-//!   the traffic they control (`direction=forward/backward`, else inferred:
-//!   the end of the road nearest the node is the junction being approached)
-//!   and face that traffic.
-//! - **Signals on an intersection node** become one pole per approach, at the
-//!   right-hand corner, facing it.
-//! - **Lamps and other objects on a road** move to its curb and face it;
-//!   power poles and pylons turn their crossarms across their line.
-//! - **Objects beside a road** (benches, shelters, lamps, hydrants...) face the
-//!   nearest road within reach; subway stairs run along it.
-//!
-//! Traffic is assumed to keep right. Headings are compass radians: the
-//! direction an object's front (its sign face, lamp arm, open side) faces.
+//! Traffic keeps right. Headings are compass radians.
 
 use crate::classify::{Facing, Kind};
 use crate::geo::{meters_per_unit, Point};

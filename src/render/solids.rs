@@ -323,9 +323,9 @@ fn window_lit(f: &Feature, edge: usize, floor: usize) -> bool {
 }
 
 /// A pitched roof over a footprint (meters around the anchor).
-struct RoofPlan {
+pub(crate) struct RoofPlan {
     shape: RoofShape,
-    eave: f32,
+    pub(crate) eave: f32,
     top: f32,
     /// Center, ridge axis and half-extents of the footprint's minimum-area
     /// bounding rectangle, along and across the ridge.
@@ -372,7 +372,7 @@ fn oriented_box(pts: &[[f64; 2]]) -> ([f64; 2], [f64; 2], f64, f64) {
     }
 }
 
-fn roof_plan(
+pub(crate) fn roof_plan(
     f: &Feature,
     d: &Detail,
     footprint: &[[f64; 2]],
@@ -421,7 +421,18 @@ fn roof_plan(
 }
 
 impl RoofPlan {
-    fn build(&self, mesh: &mut Mesh, footprint: &[[f64; 2]], base: f32, roof: Color, gable: Color) {
+    pub(crate) fn shape(&self) -> RoofShape {
+        self.shape
+    }
+
+    pub(crate) fn build(
+        &self,
+        mesh: &mut Mesh,
+        footprint: &[[f64; 2]],
+        base: f32,
+        roof: Color,
+        gable: Color,
+    ) {
         let (eave, top) = (self.eave as f64, self.top as f64);
         let c = self.center;
         let inside = [c[0], c[1], (eave + base as f64) / 2.0];

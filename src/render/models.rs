@@ -33,7 +33,7 @@ fn panel(m: &mut Mesh, pts: Vec<V3>, color: Color) {
     m.face(back, color);
 }
 
-/// A vertical rectangle in the east–up plane at `s`, centered at `e`.
+/// A vertical rectangle in the east-up plane at `s`, centered at `e`.
 fn sign_plate(m: &mut Mesh, e: f64, s: f64, w: f64, z0: f64, z1: f64, color: Color) {
     let hw = w / 2.0;
     panel(
@@ -48,7 +48,7 @@ fn sign_plate(m: &mut Mesh, e: f64, s: f64, w: f64, z0: f64, z1: f64, color: Col
     );
 }
 
-fn tree(m: &mut Mesh, h: f64, conifer: bool, c: &ObjectPaint, trunk: Color) {
+pub(crate) fn tree(m: &mut Mesh, h: f64, conifer: bool, c: &ObjectPaint, trunk: Color) {
     if conifer {
         m.cylinder(0.0, 0.0, 0.15, 0.0, 0.2 * h, trunk, trunk, 6);
         m.cone(0.0, 0.0, 0.24 * h, 0.15 * h, 0.75 * h, c.accent, 10);
@@ -170,7 +170,7 @@ fn tower(m: &mut Mesh, h: f64, variant: u8, c: &ObjectPaint) {
 }
 
 /// Builds the model of `kind`, `h` meters tall.
-fn model(kind: Kind, variant: u8, h: f64, c: &ObjectPaint, theme_trunk: Color) -> Mesh {
+pub(crate) fn model(kind: Kind, variant: u8, h: f64, c: &ObjectPaint, theme_trunk: Color) -> Mesh {
     use Kind as K;
     let mut m = Mesh::new();
     let (body, top, accent) = (c.body, c.top, c.accent);

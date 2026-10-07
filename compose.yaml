@@ -1,7 +1,5 @@
-# Usage: MAP=./nyc.osm.pbf docker compose up --build
-# The whole map is held in memory: the NYC extract peaks near 3 GB while loading,
-# then serves from about 1.7 GB
-# plus the tile cache (--cache-mb). Small extracts (jfk.osm.pbf) need far less.
+# MAP=./nyc.osm.pbf docker compose up --build
+# The map lives in memory: NYC peaks near 3 GB loading, then about 1.7 GB plus cache.
 services:
   maps:
     build: .
@@ -17,5 +15,4 @@ services:
           memory: 4g
     stop_grace_period: 10s
     restart: unless-stopped
-    # No healthcheck here: the distroless image has no shell or curl.
-    # Probe GET http://<host>:8080/health (returns "ok") externally.
+    # No shell in the image; probe GET /health externally.

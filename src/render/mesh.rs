@@ -10,7 +10,7 @@ use super::camera::Frame;
 use super::paint::paint;
 use tiny_skia::{Color, FillRule, LineCap, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
-pub(super) type V3 = [f64; 3];
+pub(crate) type V3 = [f64; 3];
 
 /// Direction toward the sun: from the west-south-west, fairly high.
 const SUN: V3 = [-0.55, 0.3, 0.78];
@@ -42,7 +42,7 @@ fn normalize(v: V3) -> V3 {
 }
 
 /// Scales a color's RGB by `k` (keeping alpha).
-pub(super) fn shade(c: Color, k: f32) -> Color {
+pub(crate) fn shade(c: Color, k: f32) -> Color {
     Color::from_rgba(
         (c.red() * k).min(1.0),
         (c.green() * k).min(1.0),
@@ -72,14 +72,14 @@ enum Prim {
 }
 
 /// Collects primitives of one object, then draws them in depth order.
-pub(super) struct Mesh {
+pub(crate) struct Mesh {
     prims: Vec<Prim>,
     /// Whether faces are lit by the sun (off for glowing parts).
-    pub(super) lit: bool,
+    pub(crate) lit: bool,
 }
 
 impl Mesh {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Mesh {
             prims: Vec::new(),
             lit: true,
@@ -89,14 +89,14 @@ impl Mesh {
     /// A planar face. Its winding decides its outward side: the outward
     /// normal is `-(p1 - p0) × (p2 - p0)` in this [east, south, up] frame.
     /// Back faces are culled. See [`Mesh::face_outward`] to orient faces.
-    pub(super) fn face(&mut self, pts: Vec<V3>, color: Color) {
+    pub(crate) fn face(&mut self, pts: Vec<V3>, color: Color) {
         if pts.len() >= 3 {
             self.prims.push(Prim::Face { pts, color });
         }
     }
 
     /// A face oriented so its outward side points away from `inside`.
-    pub(super) fn face_outward(&mut self, mut pts: Vec<V3>, inside: V3, color: Color) {
+    pub(crate) fn face_outward(&mut self, mut pts: Vec<V3>, inside: V3, color: Color) {
         if pts.len() < 3 {
             return;
         }
@@ -110,7 +110,7 @@ impl Mesh {
 
     /// A vertical prism over `footprint` (counter-clockwise seen from above,
     /// in [east, south] meters) from `z0` to `z1`. `top` colors the cap.
-    pub(super) fn prism(
+    pub(crate) fn prism(
         &mut self,
         footprint: &[[f64; 2]],
         z0: f64,
@@ -151,7 +151,7 @@ impl Mesh {
 
     /// An axis-aligned box centered at (`x`, `y`) on the ground plane.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn cuboid(
+    pub(crate) fn cuboid(
         &mut self,
         x: f64,
         y: f64,
@@ -174,7 +174,7 @@ impl Mesh {
 
     /// A cylinder approximated by `sides` facets.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn cylinder(
+    pub(crate) fn cylinder(
         &mut self,
         x: f64,
         y: f64,
@@ -196,7 +196,7 @@ impl Mesh {
 
     /// A cone (or pyramid with few sides) standing on the ground plane.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn cone(
+    pub(crate) fn cone(
         &mut self,
         x: f64,
         y: f64,
@@ -218,7 +218,7 @@ impl Mesh {
     }
 
     /// A sphere: drawn as a shaded disc (exact for an orthographic camera).
-    pub(super) fn ball(&mut self, center: V3, radius: f64, color: Color, highlight: Color) {
+    pub(crate) fn ball(&mut self, center: V3, radius: f64, color: Color, highlight: Color) {
         self.prims.push(Prim::Ball {
             center,
             radius,
@@ -228,13 +228,13 @@ impl Mesh {
     }
 
     /// A thin bar between two points, `width` meters thick.
-    pub(super) fn beam(&mut self, a: V3, b: V3, width: f64, color: Color) {
+    pub(crate) fn beam(&mut self, a: V3, b: V3, width: f64, color: Color) {
         self.prims.push(Prim::Beam { a, b, width, color });
     }
 
     /// Turns the whole mesh to face compass `heading` (radians): models are
     /// built facing south (+y), the side a sign face or a lamp arm is on.
-    pub(super) fn turn_to(&mut self, heading: f64) {
+    pub(crate) fn turn_to(&mut self, heading: f64) {
         if !heading.is_finite() {
             return;
         }
@@ -346,6 +346,156 @@ impl Mesh {
                 }
             }
         }
+    }
+}
+
+/// A triangle vertex for GPU rendering: position (meters), outward normal,
+/// base color (unshaded; the GPU lights it).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Vertex {
+    pub(crate) pos: V3,
+    pub(crate) normal: V3,
+    pub(crate) color: Color,
+}
+
+impl Mesh {
+    /// The mesh as triangles with outward normals, for GPU rendering.
+    pub(crate) fn triangles(&self, out: &mut Vec<Vertex>) {
+        for prim in &self.prims {
+            match prim {
+                Prim::Face { pts, color } => face_triangles(pts, *color, out),
+                Prim::Ball {
+                    center,
+                    radius,
+                    color,
+                    ..
+                } => ball_triangles(*center, *radius, *color, out),
+                Prim::Beam { a, b, width, color } => beam_triangles(*a, *b, *width, *color, out),
+            }
+        }
+    }
+}
+
+/// Triangulates a planar face (outward normal is `-(p1-p0) × (p2-p0)`).
+pub(crate) fn face_triangles(pts: &[V3], color: Color, out: &mut Vec<Vertex>) {
+    if pts.len() < 3 {
+        return;
+    }
+    // Newell's method: robust normal for any planar polygon.
+    let mut n = [0.0; 3];
+    for i in 0..pts.len() {
+        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    let normal = normalize([-n[0], -n[1], -n[2]]);
+    let v = |p: V3| Vertex {
+        pos: p,
+        normal,
+        color,
+    };
+    if pts.len() <= 4 {
+        for i in 1..pts.len() - 1 {
+            out.extend([v(pts[0]), v(pts[i]), v(pts[i + 1])]);
+        }
+        return;
+    }
+    // Project onto the plane's dominant axis and ear-clip.
+    let (ax, ay) = match (n[0].abs(), n[1].abs(), n[2].abs()) {
+        (x, y, z) if z >= x && z >= y => (0, 1),
+        (x, y, _) if y >= x => (0, 2),
+        _ => (1, 2),
+    };
+    let flat: Vec<f64> = pts.iter().flat_map(|p| [p[ax], p[ay]]).collect();
+    if let Ok(idx) = earcutr::earcut(&flat, &[], 2) {
+        for t in idx.as_chunks::<3>().0 {
+            let (a, b, c) = (pts[t[0]], pts[t[1]], pts[t[2]]);
+            // Keep the winding consistent with the face's normal.
+            let tn = cross(sub(b, a), sub(c, a));
+            if dot([-tn[0], -tn[1], -tn[2]], normal) >= 0.0 {
+                out.extend([v(a), v(b), v(c)]);
+            } else {
+                out.extend([v(a), v(c), v(b)]);
+            }
+        }
+    }
+}
+
+/// A sphere as a once-subdivided octahedron (32 faces).
+fn ball_triangles(c: V3, r: f64, color: Color, out: &mut Vec<Vertex>) {
+    let axes: [V3; 6] = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    let mid = |a: V3, b: V3| normalize([a[0] + b[0], a[1] + b[1], a[2] + b[2]]);
+    let v = |d: V3| Vertex {
+        pos: [c[0] + d[0] * r, c[1] + d[1] * r, c[2] + d[2] * r],
+        normal: d,
+        color,
+    };
+    for (pole, flip) in [(axes[4], false), (axes[5], true)] {
+        for i in 0..4 {
+            let (a, b) = (axes[i], axes[(i + 1) % 4]);
+            let (a, b) = if flip { (b, a) } else { (a, b) };
+            let (ab, bp, pa) = (mid(a, b), mid(b, pole), mid(pole, a));
+            for [x, y, z] in [[a, ab, pa], [ab, b, bp], [pa, bp, pole], [ab, bp, pa]] {
+                out.extend([v(x), v(y), v(z)]);
+            }
+        }
+    }
+}
+
+/// A bar as a square prism of side `w` from `a` to `b`.
+fn beam_triangles(a: V3, b: V3, w: f64, color: Color, out: &mut Vec<Vertex>) {
+    let d = normalize(sub(b, a));
+    let up = if d[2].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let u = normalize(cross(d, up));
+    let v2 = normalize(cross(d, u));
+    let h = w / 2.0;
+    let corner = |p: V3, su: f64, sv: f64| {
+        [
+            p[0] + (u[0] * su + v2[0] * sv) * h,
+            p[1] + (u[1] * su + v2[1] * sv) * h,
+            p[2] + (u[2] * su + v2[2] * sv) * h,
+        ]
+    };
+    let sides = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)];
+    for i in 0..4 {
+        let (s0, s1) = (sides[i], sides[(i + 1) % 4]);
+        let quad = [
+            corner(a, s0.0, s0.1),
+            corner(a, s1.0, s1.1),
+            corner(b, s1.0, s1.1),
+            corner(b, s0.0, s0.1),
+        ];
+        let mid = [(s0.0 + s1.0) / 2.0, (s0.1 + s1.1) / 2.0];
+        let normal = normalize([
+            u[0] * mid[0] + v2[0] * mid[1],
+            u[1] * mid[0] + v2[1] * mid[1],
+            u[2] * mid[0] + v2[2] * mid[1],
+        ]);
+        let vx = |p: V3| Vertex {
+            pos: p,
+            normal,
+            color,
+        };
+        out.extend([
+            vx(quad[0]),
+            vx(quad[1]),
+            vx(quad[2]),
+            vx(quad[0]),
+            vx(quad[2]),
+            vx(quad[3]),
+        ]);
     }
 }
 

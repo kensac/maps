@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Maps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Material 3 tokens (baseline scheme). */
+  :root {
+    --primary: #3a608f; --on-primary: #fff;
+    --secondary-container: #d8e3f8; --on-secondary-container: #111c2b;
+    --surface: #f9f9ff; --surface-container: #eceef4; --surface-container-high: #e7e8ee;
+    --on-surface: #191c20; --on-surface-variant: #43474e; --outline-variant: #c3c6cf;
+    --scrim: rgba(0, 0, 0, .32); --bg: #e9e5dc;
+    --elevation-1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
+    --elevation-3: 0 1px 3px rgba(0,0,0,.3), 0 4px 8px 3px rgba(0,0,0,.15);
+  }
+  :root[data-theme="dark"] {
+    --primary: #a4c9fe; --on-primary: #00315d;
+    --secondary-container: #3c4758; --on-secondary-container: #d8e3f8;
+    --surface: #111318; --surface-container: #1d2024; --surface-container-high: #282a2f;
+    --on-surface: #e1e2e8; --on-surface-variant: #c3c6cf; --outline-variant: #43474e;
+    --bg: #12151b;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg);
+    font: 400 14px/20px Roboto, system-ui, sans-serif; color: var(--on-surface);
+    -webkit-user-select: none; user-select: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  svg { width: 24px; height: 24px; fill: currentColor; display: block; }
+
+  /* Buttons share a state layer: 8% on hover, 12% when pressed. */
+  .btn { position: relative; border: 0; padding: 0; cursor: pointer; display: grid; place-items: center;
+    font: 500 14px/20px Roboto, system-ui, sans-serif; letter-spacing: .1px; -webkit-tap-highlight-color: transparent; }
+  .btn::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0;
+    transition: opacity 120ms; }
+  .btn:hover::after { opacity: .08; } .btn:active::after { opacity: .12; }
+  .btn:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+  .fab { width: 40px; height: 40px; border-radius: 12px; background: var(--surface-container-high);
+    color: var(--primary); box-shadow: var(--elevation-3); }
+  .tonal { width: 40px; height: 40px; border-radius: 20px; background: var(--secondary-container);
+    color: var(--on-secondary-container); box-shadow: var(--elevation-1); }
+  .icon { width: 40px; height: 40px; border-radius: 20px; background: transparent; color: var(--on-surface-variant); }
+  .text-btn { height: 40px; padding: 0 12px; border-radius: 20px; background: transparent; color: var(--primary); }
+
+  .controls { position: absolute; right: 16px; bottom: 32px; display: flex; flex-direction: column;
+    align-items: center; gap: 12px; z-index: 2; }
+  .zoom { display: flex; flex-direction: column; border-radius: 20px; background: var(--surface-container-high);
+    box-shadow: var(--elevation-3); overflow: hidden; }
+  .zoom .icon { border-radius: 0; }
+  .top { position: absolute; top: 16px; right: 16px; display: flex; gap: 8px; z-index: 2; }
+  #compass svg { transition: transform 60ms linear; }
+  .attribution { position: absolute; right: 8px; bottom: 6px; font-size: 11px; line-height: 16px; z-index: 2;
+    color: var(--on-surface-variant); }
+  .attribution a { color: inherit; }
+
+  /* Linear progress, indeterminate. */
+  .progress { position: absolute; top: 0; left: 0; right: 0; height: 4px; overflow: hidden; z-index: 3;
+    background: var(--secondary-container); visibility: hidden; }
+  .progress::before { content: ""; position: absolute; top: 0; bottom: 0; width: 40%; background: var(--primary);
+    animation: slide 1.2s cubic-bezier(.4, 0, .2, 1) infinite; }
+  @keyframes slide { from { left: -40%; } to { left: 100%; } }
+
+  /* Dialog. */
+  .scrim { position: fixed; inset: 0; background: var(--scrim); display: none; place-items: center; z-index: 4; }
+  .scrim.open { display: grid; }
+  .dialog { min-width: 280px; max-width: 560px; padding: 24px; border-radius: 28px; background: var(--surface-container-high);
+    box-shadow: var(--elevation-3); }
+  .dialog h2 { margin: 0 0 16px; font: 400 24px/32px Roboto, system-ui, sans-serif; }
+  .row { display: flex; justify-content: space-between; gap: 32px; padding: 8px 0; }
+  .row span:last-child { color: var(--on-surface-variant); }
+  .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+<div class="progress" id="progress"></div>
+
+<div class="top">
+  <button class="btn tonal" id="theme" title="Dark theme" aria-label="Dark theme">
+    <svg viewBox="0 0 24 24" id="themeIcon"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
+  </button>
+  <button class="btn tonal" id="help" title="Controls" aria-label="Controls">
+    <svg viewBox="0 0 24 24"><path d="M11 18h2v-2h-2v2zm1-16C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-2.21 0-4 1.79-4 4h2c0-1.1.9-2 2-2s2 .9 2 2c0 2-3 1.75-3 5h2c0-2.25 3-2.5 3-5 0-2.21-1.79-4-4-4z"/></svg>
+  </button>
+</div>
+
+<div class="controls">
+  <button class="btn fab" id="compass" title="Face north" aria-label="Face north">
+    <svg viewBox="0 0 24 24"><path d="M12 2 6 12h12z"/><path d="M12 22 6 12h12z" opacity=".35"/></svg>
+  </button>
+  <button class="btn fab" id="tilt" title="Tilt" aria-label="Tilt"><span id="tiltLabel">2D</span></button>
+  <div class="zoom">
+    <button class="btn icon" id="zin" title="Zoom in" aria-label="Zoom in">
+      <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+    </button>
+    <button class="btn icon" id="zout" title="Zoom out" aria-label="Zoom out">
+      <svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>
+    </button>
+  </div>
+</div>
+<div class="attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors</div>
+
+<div class="scrim" id="helpDialog">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <h2 id="helpTitle">Controls</h2>
+    <div class="row"><span>Move</span><span>Drag</span></div>
+    <div class="row"><span>Zoom</span><span>Scroll or pinch</span></div>
+    <div class="row"><span>Rotate and tilt</span><span>Right drag or Ctrl drag</span></div>
+    <div class="row"><span>Rotate on touch</span><span>Twist two fingers</span></div>
+    <div class="row"><span>Tilt on touch</span><span>Drag two fingers up or down</span></div>
+    <div class="row"><span>Face north</span><span>N</span></div>
+    <div class="actions"><button class="btn text-btn" id="helpClose">Close</button></div>
+  </div>
+</div>
+
+<script type="module">
+"use strict";
+const meta = await (await fetch("meta.json")).json();
+const MAX_GEO = meta.geoMaxZoom, MAX_PITCH = 60, FOV = 0.6435;
+const canvas = document.getElementById("map");
+const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+const $ = (id) => document.getElementById(id);
+const rad = (d) => d * Math.PI / 180;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// Web Mercator, normalized: x east, y south, both 0..1.
+const project = (lon, lat) => {
+  const s = Math.sin(rad(clamp(lat, -85.05, 85.05)));
+  return [(lon + 180) / 360, 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)];
+};
+const unproject = (x, y) => [x * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180 / Math.PI];
+const metersPerUnit = (y) => 40075016.686 * Math.cos(rad(unproject(0.5, y)[1]));
+const [bx0, by0] = project(meta.bounds[0], meta.bounds[3]);
+const [bx1, by1] = project(meta.bounds[2], meta.bounds[1]);
+
+// ---- Camera ---------------------------------------------------------------
+// Zoom uses 256 px tiles; the center may sit anywhere within the data
+// bounds padded by a quarter of their size, so edges can be centered.
+const view = { x: (bx0 + bx1) / 2, y: (by0 + by1) / 2, z: 12, bearing: 0, pitch: 45 };
+let W = 1, H = 1, DPR = 1;
+const fitZoom = () => Math.log2(Math.min(W / ((bx1 - bx0) * 256), H / ((by1 - by0) * 256)));
+const minZoom = () => Math.max(1, fitZoom() - 1);
+function constrain() {
+  view.z = clamp(view.z, minZoom(), 22);
+  view.pitch = clamp(view.pitch, 0, MAX_PITCH);
+  view.bearing = ((view.bearing % 360) + 360) % 360;
+  const px = (bx1 - bx0) * 0.25, py = (by1 - by0) * 0.25;
+  view.x = clamp(view.x, bx0 - px, bx1 + px);
+  view.y = clamp(view.y, by0 - py, by1 + py);
+}
+function readHash() {
+  const p = location.hash.slice(1).split("/").map(Number);
+  if (p.length < 3 || !p.every(Number.isFinite)) return false;
+  [view.x, view.y] = project(p[2], p[1]);
+  view.z = p[0]; view.bearing = p[3] || 0; view.pitch = p.length > 4 ? p[4] : 45;
+  return true;
+}
+
+// The camera looks at the view center from distance D (pixels), tilted by
+// pitch and turned by bearing. World units are pixels at the current zoom,
+// relative to the center: x east, y south, z up.
+let D = 1, rot = null, proj = null;
+function setupCamera() {
+  D = 0.5 * H / Math.tan(FOV / 2);
+  const b = rad(view.bearing), p = rad(view.pitch);
+  const cb = Math.cos(b), sb = Math.sin(b), cp = Math.cos(p), sp = Math.sin(p);
+  // rot: world -> camera (before the -D translation), row-major 3x3.
+  rot = [cb, sb, 0, sb * cp, -cb * cp, sp, -sb * sp, cb * sp, cp];
+  const near = D * 0.01, far = D * 40;
+  const A = -(far + near) / (far - near), B = -2 * far * near / (far - near);
+  const sx = 2 * D / W, sy = 2 * D / H;
+  const r = rot;
+  // clip = P * (rot * w + [0, 0, -D]); column-major 4x4.
+  proj = new Float32Array([
+    sx * r[0], sy * r[3], A * r[6], -r[6],
+    sx * r[1], sy * r[4], A * r[7], -r[7],
+    sx * r[2], sy * r[5], A * r[8], -r[8],
+    0, 0, -A * D + B, D,
+  ]);
+}
+const worldSize = () => 256 * 2 ** view.z;
+// Camera position in world pixels (relative to the center).
+function cameraPos() {
+  const r = rot; // inverse rotation is the transpose; camera is at R^T (0,0,D)
+  return [r[6] * D, r[7] * D, r[8] * D];
+}
+// Screen point -> ground point (normalized world), or null above the horizon.
+function screenToGround(sx, sy) {
+  const dir = [(sx - W / 2) / D, -(sy - H / 2) / D, -1];
+  const r = rot, c = cameraPos();
+  const d = [r[0] * dir[0] + r[3] * dir[1] + r[6] * dir[2],
+             r[1] * dir[0] + r[4] * dir[1] + r[7] * dir[2],
+             r[2] * dir[0] + r[5] * dir[1] + r[8] * dir[2]];
+  if (d[2] >= -1e-6) return null;
+  const t = -c[2] / d[2];
+  const ws = worldSize();
+  return [view.x + (c[0] + d[0] * t) / ws, view.y + (c[1] + d[1] * t) / ws];
+}
+
+// ---- GL programs ----------------------------------------------------------
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, "#version 300 es\nprecision highp float;\n" + src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i++) {
+    const name = gl.getActiveUniform(p, i).name;
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+// u_tile: offset x, offset y (world px), tile size (px), pixels per meter.
+const COMMON = `
+uniform mat4 u_proj; uniform vec4 u_tile;
+vec4 place(vec2 uv, float zm) { return u_proj * vec4(u_tile.xy + uv * u_tile.z, zm * u_tile.w, 1.0); }
+vec3 world(vec2 uv, float zm) { return vec3(u_tile.xy + uv * u_tile.z, zm * u_tile.w); }`;
+const LIGHT = `
+const vec3 SUN = normalize(vec3(-0.55, 0.3, 0.78));
+float lit(vec3 n) { return 0.6 + 0.4 * max(dot(normalize(n), SUN), 0.0); }`;
+
+const fillProg = program(`${COMMON}
+layout(location=0) in vec2 a_uv; layout(location=1) in vec4 a_color;
+out vec4 v_color;
+void main() { gl_Position = place(a_uv, 0.0); v_color = a_color; }`,
+`in vec4 v_color; out vec4 o; void main() { o = v_color; }`);
+
+const lineProg = program(`${COMMON}
+uniform float u_dpr;
+layout(location=0) in vec3 a_pos; layout(location=1) in vec2 a_normal;
+layout(location=2) in float a_dist; layout(location=3) in float a_width;
+layout(location=4) in float a_minpx; layout(location=5) in vec4 a_color; layout(location=6) in vec2 a_dash;
+out vec4 v_color; out float v_dist; out vec2 v_dash;
+void main() {
+  float half_px = max(a_width * u_tile.w, a_minpx * u_dpr) * 0.5;
+  vec3 p = world(a_pos.xy, a_pos.z);
+  p.xy += a_normal * half_px;
+  gl_Position = u_proj * vec4(p, 1.0);
+  v_color = a_color; v_dist = a_dist; v_dash = a_dash;
+}`,
+`in vec4 v_color; in float v_dist; in vec2 v_dash; out vec4 o;
+void main() {
+  if (v_dash.x > 0.0 && mod(v_dist, v_dash.x + v_dash.y) > v_dash.x) discard;
+  o = v_color;
+}`);
+
+const meshProg = program(`${COMMON}
+layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_normal;
+layout(location=2) in vec4 a_color; layout(location=3) in vec3 a_win;
+out vec4 v_color; out vec3 v_normal; out vec3 v_win; out float v_z; out vec2 v_xy;
+void main() {
+  gl_Position = place(a_pos.xy, a_pos.z);
+  v_color = a_color; v_normal = a_normal; v_win = a_win; v_z = a_pos.z;
+  v_xy = a_pos.xy * (u_tile.z / max(u_tile.w, 1e-6)); // meters within the tile
+}`,
+`${LIGHT}
+uniform float u_night;
+in vec4 v_color; in vec3 v_normal; in vec3 v_win; in float v_z; in vec2 v_xy; out vec4 o;
+float hash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+void main() {
+  vec3 c = v_color.rgb;
+  // Windows: a band per floor on walls, some lit at night.
+  if (v_win.x > 0.0 && abs(v_normal.z) < 0.5) {
+    float f = (v_z - v_win.y) / v_win.x;
+    float band = step(0.32, fract(f)) * step(fract(f), 0.78);
+    if (band > 0.0) {
+      vec3 glass = u_night > 0.5 ? vec3(0.10, 0.13, 0.19) : vec3(0.49, 0.58, 0.64);
+      c = mix(c, glass, u_night > 0.5 ? 0.6 : 0.42);
+      if (u_night > 0.5 && hash(vec3(floor(f), floor(v_xy / 4.0)) + v_win.z) < 0.4)
+        c = vec3(0.95, 0.78, 0.43);
+    }
+  }
+  o = vec4(c * lit(v_normal), v_color.a);
+}`);
+
+const instProg = program(`${COMMON}
+layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_normal; layout(location=2) in vec4 a_color;
+layout(location=3) in vec4 a_inst; layout(location=4) in float a_scale;
+out vec4 v_color; out vec3 v_normal;
+void main() {
+  // Models face south; turn them to their heading.
+  float a = a_inst.w - 3.14159265;
+  mat2 r = mat2(cos(a), sin(a), -sin(a), cos(a));
+  vec2 xy = r * a_pos.xy;
+  vec3 base = world(a_inst.xy, a_inst.z);
+  gl_Position = u_proj * vec4(base + vec3(xy, a_pos.z * a_scale) * u_tile.w, 1.0);
+  v_color = a_color; v_normal = vec3(r * a_normal.xy, a_normal.z);
+}`,
+`${LIGHT}
+in vec4 v_color; in vec3 v_normal; out vec4 o;
+void main() { o = vec4(v_color.rgb * lit(v_normal), v_color.a); }`);
+
+// ---- Tiles ----------------------------------------------------------------
+const tiles = new Map();          // key -> tile record
+let theme = "light", templates = null, generation = 0;
+const key = (z, x, y) => `${z}/${x}/${y}`;
+
+function vao(setup) {
+  const v = gl.createVertexArray();
+  gl.bindVertexArray(v);
+  const bufs = setup();
+  gl.bindVertexArray(null);
+  return { vao: v, bufs };
+}
+function buffer(target, data) {
+  const b = gl.createBuffer();
+  gl.bindBuffer(target, b);
+  gl.bufferData(target, data, gl.STATIC_DRAW);
+  return b;
+}
+// Interleaved attributes: [location, size, type, normalized, offset]*.
+function attribs(stride, list, divisor = 0) {
+  for (const [loc, size, type, norm, off] of list) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, type, norm, stride, off);
+    if (divisor) gl.vertexAttribDivisor(loc, divisor);
+  }
+}
+
+async function gunzip(buf) {
+  const ds = new DecompressionStream("gzip");
+  return new Response(new Blob([buf]).stream().pipeThrough(ds)).arrayBuffer();
+}
+async function fetchBinary(url, signal) {
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(res.status);
+  // Browsers decode Content-Encoding: gzip themselves; fall back if not.
+  const buf = await res.arrayBuffer();
+  const head = new Uint8Array(buf, 0, 2);
+  return head[0] === 0x1f && head[1] === 0x8b ? gunzip(buf) : buf;
+}
+
+async function loadTemplates() {
+  const buf = await fetchBinary(`models/${meta.version}/${theme}.bin`);
+  const u32 = new Uint32Array(buf);
+  const count = u32[1];
+  const out = new Map();
+  let at = 2;
+  for (let i = 0; i < count; i++) {
+    const id = u32[at], verts = u32[at + 2];
+    at += 3;
+    const data = new Uint8Array(buf, at * 4, verts * 28);
+    const rec = vao(() => {
+      const b = buffer(gl.ARRAY_BUFFER, data);
+      attribs(28, [[0, 3, gl.FLOAT, false, 0], [1, 3, gl.FLOAT, false, 12], [2, 4, gl.UNSIGNED_BYTE, true, 24]]);
+      return [b];
+    });
+    out.set(id, { ...rec, verts });
+    at += verts * 7;
+  }
+  return out;
+}
+
+function parseTile(buf) {
+  const u32 = new Uint32Array(buf);
+  let at = 1;
+  const bg = u32[at++];
+  const section = (stride) => {
+    const v = u32[at++], i = u32[at++];
+    const verts = new Uint8Array(buf, at * 4, v * stride * 4); at += v * stride;
+    const idx = new Uint32Array(buf, at * 4, i); at += i;
+    return { v, i, verts, idx };
+  };
+  const fills = section(3), lines = section(11), meshes = section(10);
+  const n = u32[at++];
+  const inst = new Float32Array(buf, at * 4, n * 6);
+  const instU = new Uint32Array(buf, at * 4, n * 6);
+  // Background quad in front of the fills.
+  const bgV = new Uint32Array(12), f = new Float32Array(bgV.buffer);
+  [[0, 0], [1, 0], [1, 1], [0, 1]].forEach(([u, v], k) => { f[k * 3] = u; f[k * 3 + 1] = v; bgV[k * 3 + 2] = bg; });
+  return { fills, lines, meshes, n, inst, instU, bgV };
+}
+
+function upload(t, d) {
+  const fv = new Uint8Array(d.bgV.byteLength + d.fills.verts.byteLength);
+  fv.set(new Uint8Array(d.bgV.buffer), 0); fv.set(d.fills.verts, d.bgV.byteLength);
+  const fi = new Uint32Array(6 + d.fills.i);
+  fi.set([0, 1, 2, 0, 2, 3]); fi.set(d.fills.idx.map((x) => x + 4), 6);
+  t.fill = vao(() => [buffer(gl.ARRAY_BUFFER, fv), buffer(gl.ELEMENT_ARRAY_BUFFER, fi),
+    attribs(12, [[0, 2, gl.FLOAT, false, 0], [1, 4, gl.UNSIGNED_BYTE, true, 8]])]);
+  t.fillCount = fi.length;
+  if (d.lines.i) {
+    t.line = vao(() => [buffer(gl.ARRAY_BUFFER, d.lines.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, d.lines.idx),
+      attribs(44, [[0, 3, gl.FLOAT, false, 0], [1, 2, gl.FLOAT, false, 12], [2, 1, gl.FLOAT, false, 20],
+        [3, 1, gl.FLOAT, false, 24], [4, 1, gl.FLOAT, false, 28], [5, 4, gl.UNSIGNED_BYTE, true, 32],
+        [6, 2, gl.FLOAT, false, 36]])]);
+    t.lineCount = d.lines.i;
+  }
+  if (d.meshes.i) {
+    t.mesh = vao(() => [buffer(gl.ARRAY_BUFFER, d.meshes.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, d.meshes.idx),
+      attribs(40, [[0, 3, gl.FLOAT, false, 0], [1, 3, gl.FLOAT, false, 12], [2, 4, gl.UNSIGNED_BYTE, true, 24],
+        [3, 3, gl.FLOAT, false, 28]])]);
+    t.meshCount = d.meshes.i;
+  }
+  // Instances, grouped by template.
+  t.inst = [];
+  if (d.n && templates) {
+    const groups = new Map();
+    for (let k = 0; k < d.n; k++) {
+      const id = d.instU[k * 6 + 5];
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(k);
+    }
+    for (const [id, list] of groups) {
+      const tpl = templates.get(id);
+      if (!tpl) continue;
+      const data = new Float32Array(list.length * 5);
+      list.forEach((k, j) => data.set(d.inst.subarray(k * 6, k * 6 + 5), j * 5));
+      const rec = vao(() => {
+        // The template buffer is shared; only the instance buffer is ours.
+        gl.bindBuffer(gl.ARRAY_BUFFER, tpl.bufs[0]);
+        attribs(28, [[0, 3, gl.FLOAT, false, 0], [1, 3, gl.FLOAT, false, 12], [2, 4, gl.UNSIGNED_BYTE, true, 24]]);
+        const ib = buffer(gl.ARRAY_BUFFER, data);
+        attribs(20, [[3, 4, gl.FLOAT, false, 0], [4, 1, gl.FLOAT, false, 16]], 1);
+        return [ib];
+      });
+      t.inst.push({ ...rec, verts: tpl.verts, count: list.length });
+    }
+  }
+}
+
+function freeTile(t) {
+  for (const r of [t.fill, t.line, t.mesh, ...(t.inst || [])]) {
+    if (!r) continue;
+    gl.deleteVertexArray(r.vao);
+    for (const b of r.bufs.flat()) if (b instanceof WebGLBuffer) gl.deleteBuffer(b);
+  }
+}
+
+let pending = 0;
+function request(z, x, y) {
+  const k = key(z, x, y);
+  let t = tiles.get(k);
+  if (t) { t.used = frameNo; return t; }
+  t = { z, x, y, ready: false, used: frameNo, gen: generation, ctrl: new AbortController() };
+  tiles.set(k, t);
+  pending++; progress();
+  fetchBinary(`geo/${meta.version}/${theme}/${z}/${x}/${y}.bin`, t.ctrl.signal)
+    .then((buf) => {
+      if (t.gen !== generation || !tiles.has(k)) return;
+      upload(t, parseTile(buf));
+      t.ready = true;
+      redraw();
+    })
+    .catch(() => { if (tiles.get(k) === t) tiles.delete(k); })
+    .finally(() => { pending--; progress(); });
+  return t;
+}
+function progress() { $("progress").style.visibility = pending ? "visible" : "hidden"; }
+const SUN_ICON = '<path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM2 13h2a1 1 0 0 0 0-2H2a1 1 0 0 0 0 2zm18 0h2a1 1 0 0 0 0-2h-2a1 1 0 0 0 0 2zM11 2v2a1 1 0 0 0 2 0V2a1 1 0 0 0-2 0zm0 18v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-2 0zM5.99 4.58a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41L5.99 4.58zm12.37 12.37a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41l-1.06-1.06zm1.06-10.96a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06zM7.05 18.36a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06z"/>';
+const MOON_ICON = '<path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>';
+
+// Picks tiles: finer near the camera, coarser toward the horizon.
+function selectTiles() {
+  const corners = [[0, 0], [W, 0], [W, H], [0, H], [W / 2, 0], [0, H / 2], [W, H / 2]]
+    .map(([sx, sy]) => screenToGround(sx, sy)).filter(Boolean);
+  if (!corners.length) return [];
+  let x0 = Math.min(...corners.map((p) => p[0])), x1 = Math.max(...corners.map((p) => p[0]));
+  let y0 = Math.min(...corners.map((p) => p[1])), y1 = Math.max(...corners.map((p) => p[1]));
+  x0 = Math.max(x0, bx0); x1 = Math.min(x1, bx1); y0 = Math.max(y0, by0); y1 = Math.min(y1, by1);
+  if (x0 > x1 || y0 > y1) return [];
+  const ws = worldSize(), cam = cameraPos();
+  const out = [];
+  const visit = (z, x, y) => {
+    const n = 2 ** z, tx0 = x / n, ty0 = y / n, tx1 = (x + 1) / n, ty1 = (y + 1) / n;
+    if (tx1 < x0 || tx0 > x1 || ty1 < y0 || ty0 > y1) return;
+    // Distance from the camera to the nearest point of the tile.
+    const nx = clamp(view.x, tx0, tx1), ny = clamp(view.y, ty0, ty1);
+    const dx = (nx - view.x) * ws - cam[0], dy = (ny - view.y) * ws - cam[1];
+    const dist = Math.hypot(dx, dy, cam[2]);
+    const want = clamp(Math.round(view.z - Math.log2(Math.max(dist, D) / D)), 0, MAX_GEO);
+    if (z < want && out.length < 400) {
+      for (const [cx, cy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) visit(z + 1, x * 2 + cx, y * 2 + cy);
+    } else out.push([z, x, y]);
+  };
+  const z0 = clamp(Math.floor(view.z) - 6, 0, MAX_GEO);
+  const n0 = 2 ** z0;
+  for (let x = Math.floor(x0 * n0); x <= Math.floor(x1 * n0); x++)
+    for (let y = Math.floor(y0 * n0); y <= Math.floor(y1 * n0); y++) visit(z0, x, y);
+  return out;
+}
+
+// For a tile still loading, the closest loaded ancestor stands in.
+function drawable(z, x, y) {
+  for (let dz = 0; dz <= 6 && z - dz >= 0; dz++) {
+    const t = tiles.get(key(z - dz, x >> dz, y >> dz));
+    if (t && t.ready) return t;
+  }
+  return null;
+}
+
+// ---- Frame ----------------------------------------------------------------
+let frameNo = 0, dirty = true;
+const redraw = () => { dirty = true; };
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = canvas.clientWidth; H = canvas.clientHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  redraw();
+}
+function tileUniforms(prog, t) {
+  const ws = worldSize(), n = 2 ** t.z;
+  const ppm = ws / metersPerUnit((t.y + 0.5) / n);
+  gl.uniform4f(prog.u.u_tile, (t.x / n - view.x) * ws, (t.y / n - view.y) * ws, ws / n, ppm);
+}
+function render() {
+  frameNo++;
+  constrain();
+  setupCamera();
+  const needed = selectTiles();
+  const draw = new Set();
+  for (const [z, x, y] of needed) {
+    request(z, x, y);
+    const t = drawable(z, x, y);
+    if (t) draw.add(t);
+  }
+  // Parents before children so finer tiles paint over stand-ins.
+  const list = [...draw].sort((a, b) => a.z - b.z);
+
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  const c = [1, 3, 5].map((i) => parseInt(bg.slice(i, i + 2), 16) / 255);
+  gl.clearColor(c[0], c[1], c[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.disable(gl.CULL_FACE);
+
+  // 1. Ground: painter's order, writing the ground's depth.
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.ALWAYS); gl.depthMask(true);
+  gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 2);
+  gl.useProgram(fillProg.p);
+  gl.uniformMatrix4fv(fillProg.u.u_proj, false, proj);
+  for (const t of list) {
+    tileUniforms(fillProg, t);
+    gl.bindVertexArray(t.fill.vao);
+    gl.drawElements(gl.TRIANGLES, t.fillCount, gl.UNSIGNED_INT, 0);
+  }
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+
+  // 2. Solids and objects, depth tested.
+  gl.depthFunc(gl.LEQUAL);
+  gl.useProgram(meshProg.p);
+  gl.uniformMatrix4fv(meshProg.u.u_proj, false, proj);
+  gl.uniform1f(meshProg.u.u_night, theme === "dark" ? 1 : 0);
+  for (const t of list) {
+    if (!t.mesh) continue;
+    tileUniforms(meshProg, t);
+    gl.bindVertexArray(t.mesh.vao);
+    gl.drawElements(gl.TRIANGLES, t.meshCount, gl.UNSIGNED_INT, 0);
+  }
+  if (view.z >= 15) {
+    gl.useProgram(instProg.p);
+    gl.uniformMatrix4fv(instProg.u.u_proj, false, proj);
+    for (const t of list) {
+      if (!t.inst) continue;
+      tileUniforms(instProg, t);
+      for (const g of t.inst) {
+        gl.bindVertexArray(g.vao);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, g.verts, g.count);
+      }
+    }
+  }
+
+  // 3. Lines over the ground, hidden behind solids, not writing depth.
+  gl.depthMask(false);
+  gl.useProgram(lineProg.p);
+  gl.uniformMatrix4fv(lineProg.u.u_proj, false, proj);
+  gl.uniform1f(lineProg.u.u_dpr, 1);
+  for (const t of list) {
+    if (!t.line) continue;
+    tileUniforms(lineProg, t);
+    gl.bindVertexArray(t.line.vao);
+    gl.drawElements(gl.TRIANGLES, t.lineCount, gl.UNSIGNED_INT, 0);
+  }
+  gl.depthMask(true);
+  gl.bindVertexArray(null);
+
+  // Evict tiles unused for a while.
+  if (tiles.size > 700) {
+    const old = [...tiles.values()].filter((t) => frameNo - t.used > 120).sort((a, b) => a.used - b.used);
+    for (const t of old.slice(0, tiles.size - 600)) {
+      t.ctrl.abort(); freeTile(t); tiles.delete(key(t.z, t.x, t.y));
+    }
+  }
+  hud();
+}
+function loop() {
+  if (dirty) { dirty = false; render(); }
+  requestAnimationFrame(loop);
+}
+function hud() {
+  $("compass").querySelector("svg").style.transform =
+    `rotateX(${view.pitch * 0.7}deg) rotate(${-view.bearing}deg)`;
+  $("tiltLabel").textContent = view.pitch > 10 ? "2D" : "3D";
+  saveHash();
+}
+let hashTimer = 0;
+function saveHash() {
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => {
+    const [lon, lat] = unproject(view.x, view.y);
+    history.replaceState(null, "", `#${view.z.toFixed(2)}/${lat.toFixed(5)}/${lon.toFixed(5)}/` +
+      `${view.bearing.toFixed(1)}/${view.pitch.toFixed(0)}`);
+  }, 250);
+}
+
+// ---- Camera moves ---------------------------------------------------------
+// Keeps the ground point under (sx, sy) fixed while `change` alters the view.
+function around(sx, sy, change) {
+  setupCamera();
+  const before = screenToGround(sx, sy);
+  change();
+  constrain(); setupCamera();
+  const after = screenToGround(sx, sy);
+  if (before && after) { view.x += before[0] - after[0]; view.y += before[1] - after[1]; }
+  redraw();
+}
+function panBy(dx, dy) {
+  setupCamera();
+  const a = screenToGround(W / 2, H / 2), b = screenToGround(W / 2 - dx, H / 2 - dy);
+  if (a && b) { view.x += b[0] - a[0]; view.y += b[1] - a[1]; }
+  redraw();
+}
+const zoomAround = (sx, sy, dz) => around(sx, sy, () => { view.z += dz; });
+const rotateAround = (sx, sy, db) => around(sx, sy, () => { view.bearing += db; });
+function tiltBy(dp) { view.pitch = clamp(view.pitch + dp, 0, MAX_PITCH); redraw(); }
+let anim = 0;
+function animateTo(target, ms = 350) {
+  cancelAnimationFrame(anim);
+  const from = { ...view }, t0 = performance.now();
+  let db = ((target.bearing ?? from.bearing) - from.bearing) % 360;
+  if (db > 180) db -= 360; if (db < -180) db += 360;
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / ms), e = 1 - Math.pow(1 - k, 3);
+    if (target.z !== undefined) zoomAround(W / 2, H / 2, from.z + (target.z - from.z) * e - view.z);
+    view.bearing = from.bearing + db * e;
+    view.pitch = from.pitch + ((target.pitch ?? from.pitch) - from.pitch) * e;
+    redraw();
+    if (k < 1) anim = requestAnimationFrame(step);
+  };
+  anim = requestAnimationFrame(step);
+}
+
+// ---- Input (Google Maps style) --------------------------------------------
+const pointers = new Map();
+let mode = null, inertia = 0, velocity = [0, 0], lastMove = 0, spin = 0, spinTime = 0;
+let twist = 0, twisting = false, twoMode = null;
+const TWIST_THRESHOLD = 12, SNAP_NORTH = 7;
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  cancelAnimationFrame(inertia); cancelAnimationFrame(anim);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const orbit = e.button === 2 || e.ctrlKey || e.metaKey;
+  mode = pointers.size === 1 ? (orbit ? "orbit" : "pan") : "multi";
+  twist = 0; twisting = false; twoMode = null; spin = 0;
+});
+function trackSpin(db) {
+  const now = performance.now(), dt = Math.max(1, now - spinTime);
+  spin = 0.6 * spin + 0.4 * (db / dt); spinTime = now;
+}
+canvas.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  if (mode === "multi" && pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    const before = { d: Math.hypot(b.x - a.x, b.y - a.y), ang: Math.atan2(b.y - a.y, b.x - a.x),
+                     mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    p.x = e.clientX; p.y = e.clientY;
+    const [a2, b2] = [...pointers.values()];
+    const after = { d: Math.hypot(b2.x - a2.x, b2.y - a2.y), ang: Math.atan2(b2.y - a2.y, b2.x - a2.x),
+                    mx: (a2.x + b2.x) / 2, my: (a2.y + b2.y) / 2 };
+    if (!twoMode) {
+      const vertical = Math.abs(after.my - before.my) > 2 * Math.abs(after.d - before.d) && Math.abs(after.my - before.my) > 1.5;
+      twoMode = vertical ? "tilt" : "pinch";
+    }
+    if (twoMode === "tilt") { tiltBy(-(after.my - before.my) * 0.35); return; }
+    zoomAround(after.mx, after.my, Math.log2(after.d / before.d));
+    let da = (after.ang - before.ang) * 180 / Math.PI;
+    if (da > 180) da -= 360; if (da < -180) da += 360;
+    if (!twisting) {
+      twist += da;
+      if (Math.abs(twist) > TWIST_THRESHOLD) { twisting = true; da = twist - Math.sign(twist) * TWIST_THRESHOLD; }
+      else da = 0;
+    }
+    if (da) { rotateAround(after.mx, after.my, -da); trackSpin(-da); }
+    panBy(after.mx - before.mx, after.my - before.my);
+    return;
+  }
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (mode === "pan") {
+    panBy(dx, dy);
+    const now = performance.now(), dt = Math.max(1, now - lastMove);
+    velocity = [dx / dt, dy / dt]; lastMove = now;
+  } else if (mode === "orbit") {
+    const db = dx * 0.3;
+    view.bearing += db; trackSpin(db);
+    tiltBy(-dy * 0.3);
+  }
+});
+function spinDown(rate) {
+  let t = performance.now();
+  const settle = () => {
+    let off = view.bearing % 360; if (off > 180) off -= 360;
+    if (Math.abs(off) < SNAP_NORTH && Math.abs(off) > 0.01) animateTo({ bearing: 0 }, 250);
+  };
+  if (Math.abs(rate) < 0.02) return settle();
+  const step = (now) => {
+    const dt = now - t; t = now;
+    view.bearing += rate * dt; redraw();
+    rate *= Math.pow(0.992, dt);
+    if (Math.abs(rate) > 0.01) inertia = requestAnimationFrame(step); else settle();
+  };
+  inertia = requestAnimationFrame(step);
+}
+function glide() {
+  let [vx, vy] = velocity, t = performance.now();
+  const step = (now) => {
+    const dt = now - t; t = now;
+    panBy(vx * dt, vy * dt);
+    vx *= Math.pow(0.994, dt); vy *= Math.pow(0.994, dt);
+    if (Math.hypot(vx, vy) > 0.02) inertia = requestAnimationFrame(step);
+  };
+  inertia = requestAnimationFrame(step);
+}
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size === 0) {
+    if (mode === "pan" && performance.now() - lastMove < 60) glide();
+    if (mode === "orbit" || twisting) spinDown(performance.now() - spinTime < 60 ? spin : 0);
+    mode = null;
+  } else if (pointers.size === 1) {
+    if (twisting) spinDown(0);
+    mode = "pan"; twisting = false; twist = 0; twoMode = null;
+  }
+}
+canvas.addEventListener("pointerup", endPointer);
+canvas.addEventListener("pointercancel", endPointer);
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? H : 1;
+  const k = e.ctrlKey ? 0.012 : 0.0022; // trackpad pinch arrives as ctrl+wheel
+  zoomAround(e.clientX, e.clientY, clamp(-e.deltaY * unit * k, -1, 1));
+}, { passive: false });
+canvas.addEventListener("dblclick", (e) => {
+  const z0 = view.z, target = z0 + (e.shiftKey ? -1 : 1), t0 = performance.now();
+  cancelAnimationFrame(anim);
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / 300), ease = 1 - Math.pow(1 - k, 3);
+    zoomAround(e.clientX, e.clientY, z0 + (target - z0) * ease - view.z);
+    if (k < 1) anim = requestAnimationFrame(step);
+  };
+  anim = requestAnimationFrame(step);
+});
+addEventListener("keydown", (e) => {
+  if ($("helpDialog").classList.contains("open")) {
+    if (e.key === "Escape") $("helpDialog").classList.remove("open");
+    return;
+  }
+  const s = e.shiftKey;
+  const keys = {
+    ArrowLeft: () => s ? (view.bearing -= 15, redraw()) : panBy(120, 0),
+    ArrowRight: () => s ? (view.bearing += 15, redraw()) : panBy(-120, 0),
+    ArrowUp: () => s ? tiltBy(10) : panBy(0, 120),
+    ArrowDown: () => s ? tiltBy(-10) : panBy(0, -120),
+    "+": () => animateTo({ z: Math.round(view.z) + 1 }), "=": () => animateTo({ z: Math.round(view.z) + 1 }),
+    "-": () => animateTo({ z: Math.round(view.z) - 1 }),
+    n: () => animateTo({ bearing: 0 }),
+  };
+  if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+});
+addEventListener("resize", resize);
+addEventListener("hashchange", () => { if (readHash()) redraw(); });
+
+// ---- Controls -------------------------------------------------------------
+$("zin").onclick = () => animateTo({ z: Math.round(view.z) + 1 });
+$("zout").onclick = () => animateTo({ z: Math.round(view.z) - 1 });
+$("compass").onclick = () => animateTo({ bearing: 0 });
+$("tilt").onclick = () => animateTo({ pitch: view.pitch > 10 ? 0 : 50 });
+$("help").onclick = () => $("helpDialog").classList.add("open");
+$("helpClose").onclick = () => $("helpDialog").classList.remove("open");
+$("helpDialog").onclick = (e) => { if (e.target === $("helpDialog")) $("helpDialog").classList.remove("open"); };
+$("theme").onclick = async () => {
+  theme = theme === "light" ? "dark" : "light";
+  document.documentElement.dataset.theme = theme;
+  $("themeIcon").innerHTML = theme === "light" ? MOON_ICON : SUN_ICON;
+  $("theme").title = $("theme").ariaLabel = theme === "light" ? "Dark theme" : "Light theme";
+  generation++;
+  for (const t of tiles.values()) { t.ctrl.abort(); freeTile(t); }
+  tiles.clear();
+  templates = await loadTemplates();
+  redraw();
+};
+
+// ---- Start ----------------------------------------------------------------
+if (!readHash()) {
+  view.x = (bx0 + bx1) / 2; view.y = (by0 + by1) / 2;
+}
+resize();
+if (!location.hash) view.z = fitZoom() + 0.3;
+templates = await loadTemplates();
+redraw();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

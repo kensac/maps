@@ -1,15 +1,8 @@
 //! Smooth elevation profiles for roads and rails.
 //!
-//! OSM marks bridges (`bridge=*`, `layer=*`) but not how a road climbs to
-//! them. Raising each bridge way to its deck height on its own makes a step
-//! where it meets the ground road, and between decks on different layers.
-//!
-//! Instead, decks keep their height and elevation spreads outward through
-//! the connected network, falling by at most a realistic grade per meter
-//! travelled (5% for roads, 2.5% for rail). The approaches become ramps that
-//! meet the ground smoothly, and layered decks blend into each other. This is
-//! a max-propagation (a Dijkstra on heights) seeded by every deck vertex;
-//! it only ever touches the few hundred meters around bridges.
+//! Bridge decks keep their layer height; height then spreads through the
+//! connected network, dropping at most 5% (roads) or 2.5% (rail) per meter,
+//! so approaches become ramps instead of steps.
 
 use crate::classify::{flags, Kind};
 use crate::geo::meters_per_unit;
