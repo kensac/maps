@@ -26,9 +26,13 @@ pyramid offline.
 - Only tiles inside the view frustum load, near ones at full detail and far
   ones coarser, with haze toward the horizon and parent tiles standing in
   while children load.
-- Tiles are compact: 16-bit positions in columns, shared mesh vertices and
-  normals derived in the shader. A dense Midtown view is about 7 MB gzipped
-  (it was 48 MB with 32-bit floats per vertex).
+- Tiles are compact: 16-bit positions in columns, normals derived in the
+  shader, and flat-roofed buildings sent as outlines that the client
+  extrudes. A Lower Manhattan z15 tile is 76 KB gzipped (it was over
+  500 KB with 32-bit float meshes).
+- Buildings never vanish with distance: tiles below z15 carry simplified
+  flat-roofed versions, fewer and larger as tiles get coarser, down to
+  the skyline.
 - Material 3 controls, light and dark themes.
 - The server-rendered raster viewer is still available at `/raster`.
 
@@ -219,8 +223,10 @@ regular tile grid.
 **Geometry tiles** (`src/vtile.rs`) reuse the same styling and 3D models
 but emit vertex buffers instead of pixels: earcut fills, mitered line
 ribbons with per-vertex height, building meshes with roofs, and instances
-of shared model templates. Detail drops with zoom (solids, walls and pillars
-from z15, street objects from z16). The format (GTL2) is documented at the
+of shared model templates. Flat-roofed solids with one outline go out as
+prisms (outline, heights, colors, roof triangles) for the client to
+extrude. Detail drops with zoom: full solids, walls and pillars from z15,
+simplified buildings below it, street objects from z16. The format (GTL3) is documented at the
 top of `src/vtile.rs`; `FORMAT` is part of the data version, so a format
 change never reuses cached tiles. Every cacheable URL ends in `.bin` or
 `.png`, which CDNs such as Cloudflare cache by default.

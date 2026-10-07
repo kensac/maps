@@ -15,11 +15,17 @@
 //! order:
 //!
 //! ```text
-//! "GTL2"  u32 background rgba
+//! "GTL3"  u32 background rgba
 //! fills:  i16 u, v | u32 rgba
 //! lines:  i16 u, v, z | u16 width_cm | f32 dist | u32 rgba |
 //!         u16 dash_on_dm, dash_off_dm | i8 nx, ny (x64)
 //! meshes: i16 u, v, z | u16 base_dm | u32 rgba | u16 seed | u8 floor_dm
+//! prisms: u32 solids, u32 corners, u32 roof indices, then columns per solid
+//!         u16 corners | u16 roof indices | u16 base_dm | u16 top_dm |
+//!         u32 wall rgba | u32 roof rgba | u16 seed | u8 floor_dm,
+//!         then i16 u, v per corner and u8 roof indices (per solid, padded
+//!         once at the end). Flat-roofed solids come this way; the client
+//!         extrudes walls between base and top.
 //! instances: u32 count, [f32 u, v, z, heading, scale; u32 template]*
 //! ```
 
@@ -42,7 +48,7 @@ const TREE_SPACING: f64 = 7.0;
 /// Distance between bridge pillars, in meters.
 const PILLAR_SPACING: f64 = 35.0;
 /// Bumped with the encoding so cached tiles of another format are never reused.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 /// Quantization: tile units and meters per step.
 const UV_STEPS: f64 = 8192.0;
 const Z_STEPS: f64 = 20.0;
@@ -50,6 +56,16 @@ const Z_STEPS: f64 = 20.0;
 const FILL_FIELDS: &[(usize, usize)] = &[(0, 4), (4, 4)];
 const LINE_FIELDS: &[(usize, usize)] = &[(0, 6), (6, 2), (8, 4), (12, 4), (16, 4), (20, 2)];
 const MESH_FIELDS: &[(usize, usize)] = &[(0, 6), (6, 2), (8, 4), (12, 2), (14, 1)];
+const PRISM_FIELDS: &[(usize, usize)] = &[
+    (0, 2),
+    (2, 2),
+    (4, 2),
+    (6, 2),
+    (8, 4),
+    (12, 4),
+    (16, 2),
+    (18, 1),
+];
 
 fn rgba(c: Color) -> u32 {
     let c = c.to_color_u8();
@@ -103,6 +119,10 @@ struct Buffers {
     mesh: Section,
     /// Mesh vertex bytes to index, so shared corners are stored once.
     mesh_seen: rustc_hash::FxHashMap<[u8; 16], u32>,
+    /// Flat-roofed solids: per-solid records, outline corners, roof indices.
+    prisms: Section,
+    prism_corners: Vec<u8>,
+    prism_roofs: Vec<u8>,
     inst: Vec<u32>,
     instances: u32,
 }
@@ -354,7 +374,9 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
                         instance(&mut b, map, &tf, feat);
                     }
                 } else if z >= SOLIDS_ZOOM {
-                    solid(&mut b, map, theme, &tf, feat, id);
+                    solid(&mut b, map, theme, &tf, feat, id, None);
+                } else if keep_at(feat, z, mpu) {
+                    solid(&mut b, map, theme, &tf, feat, id, Some(1.0 / 256.0));
                 }
             }
             Group::TransportTunnels => {}
@@ -365,7 +387,7 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(
         64 + b.fill.v.len() + b.casing.v.len() + b.line.v.len() + b.mesh.v.len(),
     );
-    out.extend(b"GTL2");
+    out.extend(b"GTL3");
     out.extend(rgba(bg).to_le_bytes());
     b.fill.write(&mut out, 8, FILL_FIELDS);
     // Casings first, then lines, as one section.
@@ -376,6 +398,18 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
     lines.count += b.line.count;
     lines.write(&mut out, 24, LINE_FIELDS);
     b.mesh.write(&mut out, 16, MESH_FIELDS);
+    out.extend(b.prisms.count.to_le_bytes());
+    out.extend(((b.prism_corners.len() / 4) as u32).to_le_bytes());
+    out.extend((b.prism_roofs.len() as u32).to_le_bytes());
+    for &(at, len) in PRISM_FIELDS {
+        for rec in b.prisms.v.as_chunks::<20>().0 {
+            out.extend_from_slice(&rec[at..at + len]);
+        }
+        pad(&mut out);
+    }
+    out.extend(&b.prism_corners);
+    out.extend(&b.prism_roofs);
+    pad(&mut out);
     out.extend(b.instances.to_le_bytes());
     out.extend(b.inst.iter().flat_map(|w| w.to_le_bytes()));
     gzip_bytes(&out)
@@ -894,9 +928,67 @@ fn instance(b: &mut Buffers, map: &Map, tf: &TileFrame, feat: &Feature) {
     b.instances += 1;
 }
 
+/// A flat-roofed solid as its outline (meters around `anchor`), heights,
+/// wall and roof colors, window data and roof triangles.
+#[allow(clippy::too_many_arguments)]
+fn prism(
+    b: &mut Buffers,
+    tf: &TileFrame,
+    anchor: Point,
+    ring: &[[f64; 2]],
+    tris: &[usize],
+    [base, top]: [f32; 2],
+    [wall, roof]: [u32; 2],
+    [floor, _, seed]: [f64; 3],
+) {
+    let mut rec = [0u8; 20];
+    rec[0..2].copy_from_slice(&(ring.len() as u16).to_le_bytes());
+    rec[2..4].copy_from_slice(&(tris.len() as u16).to_le_bytes());
+    rec[4..6].copy_from_slice(&qu16(base as f64, 10.0));
+    rec[6..8].copy_from_slice(&qu16(top as f64, 10.0));
+    rec[8..12].copy_from_slice(&wall.to_le_bytes());
+    rec[12..16].copy_from_slice(&roof.to_le_bytes());
+    rec[16..18].copy_from_slice(&(seed as u16).to_le_bytes());
+    rec[18] = (floor * 10.0).round().clamp(0.0, 255.0) as u8;
+    b.prisms.vertex(&rec);
+    for p in ring {
+        b.prism_corners
+            .extend(qi16(anchor[0] + tf.units(p[0]), UV_STEPS));
+        b.prism_corners
+            .extend(qi16(anchor[1] + tf.units(p[1]), UV_STEPS));
+    }
+    b.prism_roofs.extend(tris.iter().map(|&i| i as u8));
+}
+
+/// Whether a solid is worth drawing in a low-detail tile: everything at
+/// z14, then only the larger or taller, down to the skyline.
+fn keep_at(feat: &Feature, z: u8, mpu: f64) -> bool {
+    let [x0, y0, x1, y1] = feat.bbox;
+    let area = (x1 - x0) as f64 * (y1 - y0) as f64 * mpu * mpu;
+    let h = feat.height;
+    match z {
+        14.. => true,
+        13 => h >= 20.0 || area >= 600.0,
+        12 => h >= 40.0 || area >= 5000.0,
+        11 => h >= 80.0,
+        10 => h >= 150.0,
+        _ => false,
+    }
+}
+
 /// A building or other solid, if its anchor lies in this tile: walls from
-/// base to eaves (window data for the shader) and its roof.
-fn solid(b: &mut Buffers, map: &Map, theme: &Theme, tf: &TileFrame, feat: &Feature, id: u32) {
+/// base to eaves (window data for the shader) and its roof. With `lod` (a
+/// simplification tolerance in tile units) it is a flat-roofed prism of its
+/// simplified outline, for distant tiles.
+fn solid(
+    b: &mut Buffers,
+    map: &Map,
+    theme: &Theme,
+    tf: &TileFrame,
+    feat: &Feature,
+    id: u32,
+    lod: Option<f64>,
+) {
     let outer = map.ring(feat.ring_start);
     let n = outer.len() as f64;
     let (sx, sy) = outer
@@ -920,7 +1012,10 @@ fn solid(b: &mut Buffers, map: &Map, theme: &Theme, tf: &TileFrame, feat: &Featu
         ]
     };
     let footprint: Vec<[f64; 2]> = outer.iter().map(|&p| to_m(p)).collect();
-    let roof = roof_plan(feat, &detail, &footprint, base, top);
+    let roof = match lod {
+        Some(_) => None,
+        None => roof_plan(feat, &detail, &footprint, base, top),
+    };
     let eave = roof.as_ref().map_or(top, |r| r.eave);
     let facade = match detail.facade_colour {
         Some(c) => theme.mapped_facade(c, 1.0),
@@ -951,11 +1046,32 @@ fn solid(b: &mut Buffers, map: &Map, theme: &Theme, tf: &TileFrame, feat: &Featu
         [0.0, 0.0, 0.0]
     };
 
+    let rings: Vec<Vec<[f64; 2]>> = match lod {
+        Some(tol) => vec![lod_outline(&footprint, tol * tf.m_per_unit)],
+        None => map
+            .rings(feat)
+            .map(|r| r.iter().map(|&p| to_m(p)).collect())
+            .collect(),
+    };
+    // Flat roof over one outline: send the outline, the client extrudes it.
+    if roof.is_none() && rings.len() == 1 {
+        let mut ring = rings[0].clone();
+        if ring.len() > 1 && ring.first() == ring.last() {
+            ring.pop();
+        }
+        if (3..=255).contains(&ring.len()) {
+            let flat: Vec<f64> = ring.iter().flat_map(|p| [p[0], p[1]]).collect();
+            if let Ok(tris) = earcutr::earcut(&flat, &[], 2) {
+                let colors = [rgba(facade), rgba(roof_color)];
+                prism(b, tf, anchor, &ring, &tris, [base, top], colors, window);
+                return;
+            }
+        }
+    }
     let mut walls = Vec::new();
     let mut roof_tris = Vec::new();
     let mut flat_rings: Vec<Vec<[f64; 2]>> = Vec::new();
-    for ring in map.rings(feat) {
-        let pts: Vec<[f64; 2]> = ring.iter().map(|&p| to_m(p)).collect();
+    for pts in rings {
         let k = pts.len();
         if k < 3 {
             continue;
@@ -1009,6 +1125,22 @@ fn solid(b: &mut Buffers, map: &Map, theme: &Theme, tf: &TileFrame, feat: &Featu
     }
     push_mesh(b, tf, anchor, &walls, window);
     push_mesh(b, tf, anchor, &roof_tris, [0.0; 3]);
+}
+
+/// A footprint simplified to `tol` meters; tiny ones become their box.
+fn lod_outline(pts: &[[f64; 2]], tol: f64) -> Vec<[f64; 2]> {
+    let mut ring = simplify(pts, tol);
+    if ring.len() > 1 && ring.first() == ring.last() {
+        ring.pop();
+    }
+    if ring.len() >= 3 {
+        return ring;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in pts {
+        (x0, y0, x1, y1) = (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1]));
+    }
+    vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 }
 
 fn r_shape(r: &crate::render::solids::RoofPlan) -> crate::classify::RoofShape {

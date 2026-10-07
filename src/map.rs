@@ -182,6 +182,15 @@ impl Chunk {
                 _ => 12.0,
             });
         }
+        if kind.is_extrusion() {
+            // Tall structures stay visible further out, as the skyline.
+            vis_zoom = vis_zoom.min(match height {
+                h if h >= 80.0 => 9.0,
+                h if h >= 40.0 => 10.5,
+                h if h >= 20.0 => 12.0,
+                _ => f32::INFINITY,
+            });
+        }
         if !vis_zoom.is_finite() {
             self.ring_starts.truncate(ring_start as usize);
             return;

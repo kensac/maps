@@ -377,7 +377,7 @@ async function loadTemplates() {
   return out;
 }
 
-// GTL2: see src/vtile.rs. Index width follows the vertex count.
+// GTL3: see src/vtile.rs. Index width follows the vertex count.
 // Columnar attributes: [location, size, type, normalized, bytes per vertex],
 // each column padded to 4 bytes.
 function columns(count, list) {
@@ -390,6 +390,44 @@ function columns(count, list) {
 }
 const COLUMNS = { fill: [4, 4], line: [6, 2, 4, 4, 4, 2], mesh: [6, 2, 4, 2, 1] };
 const columnBytes = (count, cols) => cols.reduce((a, c) => a + ((count * c + 3) & ~3), 0);
+
+// Flat-roofed solids arrive as outlines; extrude walls and roofs into the
+// mesh column layout (see src/vtile.rs).
+function extrudePrisms(buf, start) {
+  const dv = new DataView(buf);
+  const n = dv.getUint32(start, true), c = dv.getUint32(start + 4, true), r = dv.getUint32(start + 8, true);
+  let at = start + 12;
+  const take = (Ctor, len) => { const a = new Ctor(buf, at, len); at = (at + a.byteLength + 3) & ~3; return a; };
+  const corners = take(Uint16Array, n), tris = take(Uint16Array, n), base = take(Uint16Array, n),
+    top = take(Uint16Array, n), wall = take(Uint32Array, n), roof = take(Uint32Array, n),
+    seed = take(Uint16Array, n), floor = take(Uint8Array, n);
+  const uv = new Int16Array(buf, at, c * 2); at += c * 4;
+  const roofIdx = new Uint8Array(buf, at, r); at = (at + r + 3) & ~3;
+  const V = 3 * c, total = 6 * c + r;
+  const pos = new Int16Array(V * 3), vb = new Uint16Array(V), vc = new Uint32Array(V),
+    vs = new Uint16Array(V), vf = new Uint8Array(V);
+  const idx = V < 65536 ? new Uint16Array(total) : new Uint32Array(total);
+  let v = 0, ci = 0, ii = 0, ri = 0;
+  for (let s = 0; s < n; s++) {
+    const k = corners[s], zb = base[s] * 2, zt = top[s] * 2; // dm to 1/20 m
+    for (let i = 0; i < k; i++) {
+      const u = uv[(ci + i) * 2], w = uv[(ci + i) * 2 + 1];
+      for (const [q, z, color, fl] of [[v + i, zb, wall[s], floor[s]], [v + k + i, zt, wall[s], floor[s]],
+                                       [v + 2 * k + i, zt, roof[s], 0]]) {
+        pos[q * 3] = u; pos[q * 3 + 1] = w; pos[q * 3 + 2] = z;
+        vb[q] = base[s]; vc[q] = color; vs[q] = seed[s]; vf[q] = fl;
+      }
+      const a = v + i, b = v + (i + 1) % k;
+      idx.set([a, b, b + k, a, b + k, a + k], ii); ii += 6;
+    }
+    for (let j = 0; j < tris[s]; j++) idx[ii++] = v + 2 * k + roofIdx[ri + j];
+    ri += tris[s]; ci += k; v += 3 * k;
+  }
+  const verts = new Uint8Array(columnBytes(V, COLUMNS.mesh));
+  let o = 0;
+  for (const a of [pos, vb, vc, vs, vf]) { verts.set(new Uint8Array(a.buffer, 0, a.byteLength), o); o += (a.byteLength + 3) & ~3; }
+  return { section: { v: V, i: total, verts, idx }, end: at };
+}
 
 function parseTile(buf) {
   const dv = new DataView(buf);
@@ -405,10 +443,11 @@ function parseTile(buf) {
     return { v, i, verts, idx };
   };
   const fills = section(COLUMNS.fill), lines = section(COLUMNS.line), meshes = section(COLUMNS.mesh);
+  const pr = extrudePrisms(buf, at); at = pr.end;
   const n = dv.getUint32(at, true); at += 4;
   const inst = new Float32Array(buf, at, n * 6);
   const instU = new Uint32Array(buf, at, n * 6);
-  return { fills, lines, meshes, n, inst, instU, bg };
+  return { fills, lines, meshes, prisms: pr.section, n, inst, instU, bg };
 }
 
 const indexType = (idx) => idx instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
@@ -433,11 +472,14 @@ function upload(t, d) {
         [6, 2, US, false, 4], [1, 2, B, false, 2]])]);
     t.lineCount = d.lines.i; t.lineType = indexType(d.lines.idx);
   }
-  if (d.meshes.i) {
-    t.mesh = vao(() => [buffer(gl.ARRAY_BUFFER, d.meshes.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, d.meshes.idx),
-      columns(d.meshes.v, [[0, 3, S, false, 6], [4, 1, US, false, 2], [2, 4, UB, true, 4],
+  // Meshes and extruded prisms share the mesh layout and program.
+  t.solids = [];
+  for (const sec of [d.meshes, d.prisms]) {
+    if (!sec.i) continue;
+    const rec = vao(() => [buffer(gl.ARRAY_BUFFER, sec.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, sec.idx),
+      columns(sec.v, [[0, 3, S, false, 6], [4, 1, US, false, 2], [2, 4, UB, true, 4],
         [5, 1, US, false, 2], [3, 1, UB, false, 1]])]);
-    t.meshCount = d.meshes.i; t.meshType = indexType(d.meshes.idx);
+    t.solids.push({ ...rec, count: sec.i, type: indexType(sec.idx) });
   }
   // Instances, grouped by template.
   t.inst = [];
@@ -467,7 +509,7 @@ function upload(t, d) {
 }
 
 function freeTile(t) {
-  for (const r of [t.fill, t.line, t.mesh, ...(t.inst || [])]) {
+  for (const r of [t.fill, t.line, ...(t.solids || []), ...(t.inst || [])]) {
     if (!r) continue;
     gl.deleteVertexArray(r.vao);
     for (const b of r.bufs.flat()) if (b instanceof WebGLBuffer) gl.deleteBuffer(b);
@@ -622,10 +664,12 @@ function render() {
   fogUniforms(meshProg, c);
   gl.uniform1f(meshProg.u.u_night, theme === "dark" ? 1 : 0);
   for (const t of list) {
-    if (!t.mesh) continue;
+    if (!t.solids || !t.solids.length) continue;
     tileUniforms(meshProg, t);
-    gl.bindVertexArray(t.mesh.vao);
-    gl.drawElements(gl.TRIANGLES, t.meshCount, t.meshType, 0);
+    for (const m of t.solids) {
+      gl.bindVertexArray(m.vao);
+      gl.drawElements(gl.TRIANGLES, m.count, m.type, 0);
+    }
   }
   if (view.z >= 15) {
     gl.useProgram(instProg.p);
