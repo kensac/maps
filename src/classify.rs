@@ -182,12 +182,19 @@ impl<'a> Tags<'a> {
     }
 
     /// Tagged height in meters, from `height` or `building:levels`.
+    /// Implausible values (typos like 631 levels) count as untagged.
     pub fn height(&self) -> Option<f32> {
-        self.height.and_then(Self::meters).or_else(|| {
-            self.levels
-                .and_then(|l| l.trim().parse::<f32>().ok())
-                .map(|l| l * 3.2 + 1.0)
-        })
+        self.height
+            .and_then(Self::meters)
+            .filter(|&h| h <= MAX_HEIGHT)
+            .or_else(|| self.levels().map(|l| l * 3.2 + 1.0))
+    }
+
+    /// `building:levels`, if plausible.
+    fn levels(&self) -> Option<f32> {
+        self.levels
+            .and_then(|l| l.trim().parse::<f32>().ok())
+            .filter(|l| (0.0..=MAX_LEVELS).contains(l))
     }
 
     /// Architectural detail of a solid: roof shape and colors.
@@ -213,10 +220,7 @@ impl<'a> Tags<'a> {
                     .map(|l| l * 3.0)
             })
             .unwrap_or(0.0);
-        let levels = self
-            .levels
-            .and_then(|l| l.trim().parse::<f32>().ok())
-            .unwrap_or(0.0);
+        let levels = self.levels().unwrap_or(0.0);
         Detail {
             roof,
             roof_height,
@@ -385,6 +389,10 @@ pub struct Detail {
     /// Number of floors above ground, if tagged.
     pub levels: f32,
 }
+
+/// Taller than anything built (828 m) or with more floors (163): a typo.
+const MAX_HEIGHT: f32 = 900.0;
+const MAX_LEVELS: f32 = 200.0;
 
 /// Parses an OSM colour: `#rrggbb`, `#rgb` or a common color name.
 pub fn parse_colour(v: &str) -> Option<u32> {
@@ -1231,6 +1239,9 @@ mod tests {
         let ft = tags(&[("height", "100'")]).height().unwrap();
         assert!((ft - 30.48).abs() < 1e-3);
         assert_eq!(tags(&[("building:levels", "10")]).height(), Some(33.0));
+        // Typos fall back to untagged.
+        assert_eq!(tags(&[("building:levels", "631")]).height(), None);
+        assert_eq!(tags(&[("height", "2020")]).height(), None);
         assert_eq!(tags(&[("min_height", "40")]).min_height(), 40.0);
         assert_eq!(tags(&[("building:min_level", "2")]).min_height(), 6.4);
     }
