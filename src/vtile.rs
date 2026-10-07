@@ -8,15 +8,18 @@
 //! Positions are tile units (0..1) horizontally, meters vertically. Solids
 //! belong to the tile holding their anchor and are never cut.
 //!
-//! Little-endian, 4-byte aligned, gzipped:
+//! Little-endian, gzipped. Sections are `u32 vertices, u32 indices`, then
+//! one column per vertex field (each padded to 4 bytes, so gzip sees like
+//! with like), then indices: u16 (padded) below 65536 vertices, else u32.
+//! Positions are i16 in 1/8192 tile and heights i16 in 1/20 m. Columns, in
+//! order:
 //!
 //! ```text
-//! "GTL1"  u32 background rgba
-//! fills:     u32 vertices, u32 indices, [f32 u, f32 v, u32 rgba]*,              u32*
-//! lines:     u32 vertices, u32 indices, [f32 u, v, z, nx, ny, dist, width, minpx,
-//!                                        u32 rgba, f32 dash_on, dash_off]*,      u32*
-//! meshes:    u32 vertices, u32 indices, [f32 u, v, z, nx, ny, nz, u32 rgba,
-//!                                        f32 floor, base, seed]*,               u32*
+//! "GTL2"  u32 background rgba
+//! fills:  i16 u, v | u32 rgba
+//! lines:  i16 u, v, z | u16 width_cm | f32 dist | u32 rgba |
+//!         u16 dash_on_dm, dash_off_dm | i8 nx, ny (x64)
+//! meshes: i16 u, v, z | u16 base_dm | u32 rgba | u16 seed | u8 floor_dm
 //! instances: u32 count, [f32 u, v, z, heading, scale; u32 template]*
 //! ```
 
@@ -38,24 +41,82 @@ const SOLIDS_ZOOM: u8 = 15;
 const TREE_SPACING: f64 = 7.0;
 /// Distance between bridge pillars, in meters.
 const PILLAR_SPACING: f64 = 35.0;
+/// Bumped with the encoding so cached tiles of another format are never reused.
+pub const FORMAT: u32 = 2;
+/// Quantization: tile units and meters per step.
+const UV_STEPS: f64 = 8192.0;
+const Z_STEPS: f64 = 20.0;
+/// Vertex columns as `(offset, len)` in each record; padding is not sent.
+const FILL_FIELDS: &[(usize, usize)] = &[(0, 4), (4, 4)];
+const LINE_FIELDS: &[(usize, usize)] = &[(0, 6), (6, 2), (8, 4), (12, 4), (16, 4), (20, 2)];
+const MESH_FIELDS: &[(usize, usize)] = &[(0, 6), (6, 2), (8, 4), (12, 2), (14, 1)];
 
 fn rgba(c: Color) -> u32 {
     let c = c.to_color_u8();
     u32::from_le_bytes([c.red(), c.green(), c.blue(), c.alpha()])
 }
 
+/// Packed vertices and their indices.
+#[derive(Default)]
+struct Section {
+    v: Vec<u8>,
+    i: Vec<u32>,
+    count: u32,
+}
+
+impl Section {
+    fn vertex(&mut self, bytes: &[u8]) -> u32 {
+        self.v.extend_from_slice(bytes);
+        self.count += 1;
+        self.count - 1
+    }
+
+    /// Writes `count, indices`, the vertices as one padded column per
+    /// `(offset, len)` field of a `stride`-byte record, then the indices.
+    fn write(&self, out: &mut Vec<u8>, stride: usize, fields: &[(usize, usize)]) {
+        out.extend(self.count.to_le_bytes());
+        out.extend((self.i.len() as u32).to_le_bytes());
+        for &(at, len) in fields {
+            for rec in self.v.chunks_exact(stride) {
+                out.extend_from_slice(&rec[at..at + len]);
+            }
+            pad(out);
+        }
+        if self.count < 65536 {
+            out.extend(self.i.iter().flat_map(|&i| (i as u16).to_le_bytes()));
+        } else {
+            out.extend(self.i.iter().flat_map(|&i| i.to_le_bytes()));
+        }
+        pad(out);
+    }
+}
+
+fn pad(out: &mut Vec<u8>) {
+    out.resize(out.len().next_multiple_of(4), 0);
+}
+
 #[derive(Default)]
 struct Buffers {
-    fill_v: Vec<u32>,
-    fill_i: Vec<u32>,
-    casing_v: Vec<u32>,
-    casing_i: Vec<u32>,
-    line_v: Vec<u32>,
-    line_i: Vec<u32>,
-    mesh_v: Vec<u32>,
-    mesh_i: Vec<u32>,
+    fill: Section,
+    casing: Section,
+    line: Section,
+    mesh: Section,
+    /// Mesh vertex bytes to index, so shared corners are stored once.
+    mesh_seen: rustc_hash::FxHashMap<[u8; 16], u32>,
     inst: Vec<u32>,
     instances: u32,
+}
+
+fn qi16(v: f64, steps: f64) -> [u8; 2] {
+    ((v * steps).round().clamp(-32768.0, 32767.0) as i16).to_le_bytes()
+}
+
+fn qu16(v: f64, steps: f64) -> [u8; 2] {
+    ((v * steps).round().clamp(0.0, 65535.0) as u16).to_le_bytes()
+}
+
+fn qi8(v: f64, steps: f64) -> u8 {
+    (v * steps).round().clamp(-127.0, 127.0) as i8 as u8
 }
 
 fn f(v: f64) -> u32 {
@@ -185,11 +246,15 @@ pub fn templates(theme: &Theme) -> Vec<u8> {
 }
 
 fn gzip(words: &[u32]) -> Vec<u8> {
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    gzip_bytes(&bytes)
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write;
-    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut enc = GzEncoder::new(Vec::with_capacity(bytes.len() / 3), Compression::fast());
-    enc.write_all(&bytes).expect("writing to memory");
+    enc.write_all(bytes).expect("writing to memory");
     enc.finish().expect("writing to memory")
 }
 
@@ -203,6 +268,8 @@ struct TileFrame {
     origin: Point,
     /// Meters per tile unit (tile-normalized).
     m_per_unit: f64,
+    /// Whether walls, supports and poles are built (too small below).
+    solids: bool,
 }
 
 impl TileFrame {
@@ -232,6 +299,7 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
         size,
         origin: map.origin,
         m_per_unit: mpu * size,
+        solids: z >= SOLIDS_ZOOM,
     };
     // Style as for the middle of the zoom range this tile serves.
     let style_zoom = z as f32 + 0.5;
@@ -294,31 +362,23 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
         }
     }
 
-    let mut out: Vec<u32> = Vec::with_capacity(
-        8 + b.fill_v.len() + b.fill_i.len() + b.casing_v.len() + b.line_v.len() + b.mesh_v.len(),
+    let mut out = Vec::with_capacity(
+        64 + b.fill.v.len() + b.casing.v.len() + b.line.v.len() + b.mesh.v.len(),
     );
-    out.push(u32::from_le_bytes(*b"GTL1"));
-    out.push(rgba(bg));
-    out.push((b.fill_v.len() / 3) as u32);
-    out.push(b.fill_i.len() as u32);
-    out.extend(&b.fill_v);
-    out.extend(&b.fill_i);
-    // Casings first, then fills, as one line section.
-    const LINE: usize = 11;
-    let casing_count = (b.casing_v.len() / LINE) as u32;
-    out.push(((b.casing_v.len() + b.line_v.len()) / LINE) as u32);
-    out.push((b.casing_i.len() + b.line_i.len()) as u32);
-    out.extend(&b.casing_v);
-    out.extend(&b.line_v);
-    out.extend(&b.casing_i);
-    out.extend(b.line_i.iter().map(|i| i + casing_count));
-    out.push((b.mesh_v.len() / 10) as u32);
-    out.push(b.mesh_i.len() as u32);
-    out.extend(&b.mesh_v);
-    out.extend(&b.mesh_i);
-    out.push(b.instances);
-    out.extend(&b.inst);
-    gzip(&out)
+    out.extend(b"GTL2");
+    out.extend(rgba(bg).to_le_bytes());
+    b.fill.write(&mut out, 8, FILL_FIELDS);
+    // Casings first, then lines, as one section.
+    let mut lines = b.casing;
+    let first = lines.count;
+    lines.v.extend(&b.line.v);
+    lines.i.extend(b.line.i.iter().map(|i| i + first));
+    lines.count += b.line.count;
+    lines.write(&mut out, 24, LINE_FIELDS);
+    b.mesh.write(&mut out, 16, MESH_FIELDS);
+    out.extend(b.instances.to_le_bytes());
+    out.extend(b.inst.iter().flat_map(|w| w.to_le_bytes()));
+    gzip_bytes(&out)
 }
 
 /// Ramer-Douglas-Peucker simplification on tile units (keeps endpoints).
@@ -401,19 +461,21 @@ fn fill(
         let Ok(tris) = earcutr::earcut(&flat, &hole_idx, 2) else {
             continue;
         };
-        let base = (b.fill_v.len() / 3) as u32;
+        let base = b.fill.count;
         for p in flat.as_chunks::<2>().0 {
-            b.fill_v.extend([f(p[0]), f(p[1]), color]);
+            let [u0, u1] = qi16(p[0], UV_STEPS);
+            let [v0, v1] = qi16(p[1], UV_STEPS);
+            let c = color.to_le_bytes();
+            b.fill.vertex(&[u0, u1, v0, v1, c[0], c[1], c[2], c[3]]);
         }
-        b.fill_i.extend(tris.iter().map(|&i| base + i as u32));
+        b.fill.i.extend(tris.iter().map(|&i| base + i as u32));
     }
 }
 
 /// Appends a ribbon for a polyline with per-vertex heights (meters).
 #[allow(clippy::too_many_arguments)]
 fn ribbon(
-    verts: &mut Vec<u32>,
-    idx: &mut Vec<u32>,
+    sec: &mut Section,
     pts: &[[f64; 3]],
     tf: &TileFrame,
     spec: &StrokeSpec,
@@ -435,7 +497,7 @@ fn ribbon(
         [dx / l, dy / l]
     };
     let mut dist = start_dist;
-    let base = (verts.len() / 11) as u32;
+    let base = sec.count;
     for i in 0..n {
         let d_in = if i > 0 {
             Some(dir(pts[i - 1], pts[i]))
@@ -474,23 +536,22 @@ fn ribbon(
         }
         let p = pts[i];
         for side in [1.0, -1.0] {
-            verts.extend([
-                f(p[0]),
-                f(p[1]),
-                f(p[2]),
-                f(nx * side),
-                f(ny * side),
-                f(dist),
-                f(width_m),
-                f(0.75),
-                color,
-                f(on),
-                f(off),
-            ]);
+            let mut v = [0u8; 24];
+            v[0..2].copy_from_slice(&qi16(p[0], UV_STEPS));
+            v[2..4].copy_from_slice(&qi16(p[1], UV_STEPS));
+            v[4..6].copy_from_slice(&qi16(p[2], Z_STEPS));
+            v[6..8].copy_from_slice(&qu16(width_m, 100.0));
+            v[8..12].copy_from_slice(&(dist as f32).to_le_bytes());
+            v[12..16].copy_from_slice(&color.to_le_bytes());
+            v[16..18].copy_from_slice(&qu16(on, 10.0));
+            v[18..20].copy_from_slice(&qu16(off, 10.0));
+            v[20] = qi8(nx * side, 64.0);
+            v[21] = qi8(ny * side, 64.0);
+            sec.vertex(&v);
         }
         if i > 0 {
             let k = base + (i as u32 - 1) * 2;
-            idx.extend([k, k + 1, k + 2, k + 1, k + 3, k + 2]);
+            sec.i.extend([k, k + 1, k + 2, k + 1, k + 3, k + 2]);
         }
     }
 }
@@ -612,47 +673,45 @@ fn line_feature(
                 Some(h) if elev.is_none() => piece.iter().map(|p| [p[0], p[1], h]).collect(),
                 _ => piece.clone(),
             };
-            if raised_kind {
+            if raised_kind && tf.solids {
                 curtain(b, tf, &top, feat.base as f64, theme.barrier_face(feat.kind));
             }
-            if matches!(feat.kind, Kind::PowerLine | Kind::Aerialway | Kind::Gantry) {
+            if tf.solids && matches!(feat.kind, Kind::PowerLine | Kind::Aerialway | Kind::Gantry) {
                 poles(b, tf, &top, theme.wire(feat.kind));
             }
             let bridge = deck_height(feat.kind, feat.layer, feat.flags) > 0.0
                 || matches!(feat.kind, Kind::JetBridge | Kind::Pipeline);
-            if top.iter().any(|p| p[2] > 0.3) && feat.kind.is_transport() || bridge {
+            if tf.solids && (top.iter().any(|p| p[2] > 0.3) && feat.kind.is_transport() || bridge) {
                 support(b, theme, tf, &top, &style, ctx.ppm, bridge, dist);
             }
             if let Some(c) = &style.casing {
-                ribbon(&mut b.casing_v, &mut b.casing_i, &top, tf, c, ctx.ppm, dist);
+                ribbon(&mut b.casing, &top, tf, c, ctx.ppm, dist);
             }
             if let Some(l) = &style.line {
-                ribbon(&mut b.line_v, &mut b.line_i, &top, tf, l, ctx.ppm, dist);
+                ribbon(&mut b.line, &top, tf, l, ctx.ppm, dist);
             }
         }
     }
 }
 
 /// Pushes a triangle list (meters around `anchor_uv`) into the mesh buffer.
+/// Normals are not sent (the shader derives flat ones), so faces share
+/// their corners and identical vertices are stored once.
 fn push_mesh(b: &mut Buffers, tf: &TileFrame, anchor: Point, tris: &[Vertex], window: [f64; 3]) {
-    let base = (b.mesh_v.len() / 10) as u32;
-    for v in tris {
-        let u = anchor[0] + tf.units(v.pos[0]);
-        let w = anchor[1] + tf.units(v.pos[1]);
-        b.mesh_v.extend([
-            f(u),
-            f(w),
-            f(v.pos[2]),
-            f(v.normal[0]),
-            f(v.normal[1]),
-            f(v.normal[2]),
-            rgba(v.color),
-            f(window[0]),
-            f(window[1]),
-            f(window[2]),
-        ]);
+    let [floor, base, seed] = window;
+    for t in tris {
+        let mut v = [0u8; 16];
+        v[0..2].copy_from_slice(&qi16(anchor[0] + tf.units(t.pos[0]), UV_STEPS));
+        v[2..4].copy_from_slice(&qi16(anchor[1] + tf.units(t.pos[1]), UV_STEPS));
+        v[4..6].copy_from_slice(&qi16(t.pos[2], Z_STEPS));
+        v[6..8].copy_from_slice(&qu16(base, 10.0));
+        v[8..12].copy_from_slice(&rgba(t.color).to_le_bytes());
+        v[12..14].copy_from_slice(&(seed as u16).to_le_bytes());
+        v[14] = (floor * 10.0).round().clamp(0.0, 255.0) as u8;
+        let mesh = &mut b.mesh;
+        let i = *b.mesh_seen.entry(v).or_insert_with(|| mesh.vertex(&v));
+        b.mesh.i.push(i);
     }
-    b.mesh_i.extend((0..tris.len() as u32).map(|i| base + i));
 }
 
 /// Vertical faces between `base` meters and a line's heights.

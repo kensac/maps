@@ -66,6 +66,7 @@ pub fn router(map: &'static Map, version: String) -> Router {
         .route("/v1/lookup", get(lookup))
         .route("/v1/tallest", get(tallest))
         .route("/v1/static", get(static_map))
+        .route("/v1/static.png", get(static_map))
         .with_state(api)
 }
 

@@ -111,6 +111,7 @@ fn data_version(path: &Path) -> Result<String> {
     meta.len().hash(&mut h);
     meta.modified().ok().hash(&mut h);
     env!("CARGO_PKG_VERSION").hash(&mut h);
+    maps::vtile::FORMAT.hash(&mut h);
     Ok(format!("{:012x}", h.finish() & 0xffff_ffff_ffff))
 }
 

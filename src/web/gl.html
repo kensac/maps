@@ -220,10 +220,13 @@ function program(vs, fs) {
   return { p, u };
 }
 // u_tile: offset x, offset y (world px), tile size (px), pixels per meter.
+// Positions arrive as i16 in 1/8192 tile, heights in 1/20 m.
 const COMMON = `
-uniform mat4 u_proj; uniform vec4 u_tile;
-vec4 place(vec2 uv, float zm) { return u_proj * vec4(u_tile.xy + uv * u_tile.z, zm * u_tile.w, 1.0); }
-vec3 world(vec2 uv, float zm) { return vec3(u_tile.xy + uv * u_tile.z, zm * u_tile.w); }`;
+uniform mat4 u_proj; uniform vec4 u_tile; uniform vec3 u_cam; uniform vec2 u_fog;
+out float v_fog;
+vec3 world(vec3 q) { return vec3(u_tile.xy + q.xy / 8192.0 * u_tile.z, q.z / 20.0 * u_tile.w); }
+vec4 place(vec3 p) { v_fog = smoothstep(u_fog.x, u_fog.y, distance(p, u_cam)); return u_proj * vec4(p, 1.0); }`;
+const FOG = `uniform vec3 u_bg; in float v_fog; vec4 fog(vec4 c) { return vec4(mix(c.rgb, u_bg, v_fog), c.a); }`;
 const LIGHT = `
 const vec3 SUN = normalize(vec3(-0.55, 0.3, 0.78));
 float lit(vec3 n) { return 0.6 + 0.4 * max(dot(normalize(n), SUN), 0.0); }`;
@@ -231,55 +234,68 @@ float lit(vec3 n) { return 0.6 + 0.4 * max(dot(normalize(n), SUN), 0.0); }`;
 const fillProg = program(`${COMMON}
 layout(location=0) in vec2 a_uv; layout(location=1) in vec4 a_color;
 out vec4 v_color;
-void main() { gl_Position = place(a_uv, 0.0); v_color = a_color; }`,
-`in vec4 v_color; out vec4 o; void main() { o = v_color; }`);
+void main() { gl_Position = place(world(vec3(a_uv, 0.0))); v_color = a_color; }`,
+`${FOG} in vec4 v_color; out vec4 o; void main() { o = fog(v_color); }`);
 
 const lineProg = program(`${COMMON}
-uniform float u_dpr;
 layout(location=0) in vec3 a_pos; layout(location=1) in vec2 a_normal;
 layout(location=2) in float a_dist; layout(location=3) in float a_width;
-layout(location=4) in float a_minpx; layout(location=5) in vec4 a_color; layout(location=6) in vec2 a_dash;
+layout(location=5) in vec4 a_color; layout(location=6) in vec2 a_dash;
 out vec4 v_color; out float v_dist; out vec2 v_dash;
 void main() {
-  float half_px = max(a_width * u_tile.w, a_minpx * u_dpr) * 0.5;
-  vec3 p = world(a_pos.xy, a_pos.z);
-  p.xy += a_normal * half_px;
-  gl_Position = u_proj * vec4(p, 1.0);
-  v_color = a_color; v_dist = a_dist; v_dash = a_dash;
+  float half_px = max(a_width / 100.0 * u_tile.w, 0.75) * 0.5;
+  vec3 p = world(a_pos);
+  p.xy += a_normal / 64.0 * half_px;
+  gl_Position = place(p);
+  v_color = a_color; v_dist = a_dist; v_dash = a_dash / 10.0;
 }`,
-`in vec4 v_color; in float v_dist; in vec2 v_dash; out vec4 o;
+`${FOG} in vec4 v_color; in float v_dist; in vec2 v_dash; out vec4 o;
 void main() {
   if (v_dash.x > 0.0 && mod(v_dist, v_dash.x + v_dash.y) > v_dash.x) discard;
-  o = v_color;
+  o = fog(v_color);
 }`);
 
 const meshProg = program(`${COMMON}
-layout(location=0) in vec3 a_pos; layout(location=1) in vec3 a_normal;
-layout(location=2) in vec4 a_color; layout(location=3) in vec3 a_win;
-out vec4 v_color; out vec3 v_normal; out vec3 v_win; out float v_z; out vec2 v_xy;
+layout(location=0) in vec3 a_pos;
+layout(location=2) in vec4 a_color; layout(location=3) in float a_floor;
+layout(location=4) in float a_base; layout(location=5) in float a_seed;
+out vec4 v_color; out vec3 v_p; out vec3 v_win; out float v_z; out vec2 v_xy;
 void main() {
-  gl_Position = place(a_pos.xy, a_pos.z);
-  v_color = a_color; v_normal = a_normal; v_win = a_win; v_z = a_pos.z;
-  v_xy = a_pos.xy * (u_tile.z / max(u_tile.w, 1e-6)); // meters within the tile
+  v_p = world(a_pos);
+  gl_Position = place(v_p);
+  v_color = a_color; v_z = a_pos.z / 20.0;
+  v_win = vec3(a_floor / 10.0, a_base / 10.0, a_seed);
+  v_xy = a_pos.xy / 8192.0 * (u_tile.z / max(u_tile.w, 1e-6)); // meters within the tile
 }`,
 `${LIGHT}
-uniform float u_night;
-in vec4 v_color; in vec3 v_normal; in vec3 v_win; in float v_z; in vec2 v_xy; out vec4 o;
+${FOG}
+uniform float u_night; uniform vec3 u_cam;
+in vec4 v_color; in vec3 v_p; in vec3 v_win; in float v_z; in vec2 v_xy; out vec4 o;
 float hash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 void main() {
+  // Flat normal from screen derivatives, turned toward the camera.
+  vec3 n = normalize(cross(dFdx(v_p), dFdy(v_p)));
+  if (dot(n, u_cam - v_p) < 0.0) n = -n;
+  bool night = u_night > 0.5;
   vec3 c = v_color.rgb;
-  // Windows: a band per floor on walls, some lit at night.
-  if (v_win.x > 0.0 && abs(v_normal.z) < 0.5) {
+  float glow = 0.0;
+  // Roofs a touch lighter at night so silhouettes read.
+  if (night && n.z > 0.5) c = mix(c, vec3(0.62, 0.66, 0.74), 0.35);
+  // Windows: a band per floor on walls, faded out once smaller than a pixel.
+  if (v_win.x > 0.0 && abs(n.z) < 0.5) {
     float f = (v_z - v_win.y) / v_win.x;
-    float band = step(0.32, fract(f)) * step(fract(f), 0.78);
-    if (band > 0.0) {
-      vec3 glass = u_night > 0.5 ? vec3(0.10, 0.13, 0.19) : vec3(0.49, 0.58, 0.64);
-      c = mix(c, glass, u_night > 0.5 ? 0.6 : 0.42);
-      if (u_night > 0.5 && hash(vec3(floor(f), floor(v_xy / 4.0)) + v_win.z) < 0.4)
-        c = vec3(0.95, 0.78, 0.43);
-    }
+    float fade = 1.0 - smoothstep(0.25, 0.5, fwidth(f));
+    float band = step(0.32, fract(f)) * step(fract(f), 0.78) * fade;
+    vec3 glass = night ? vec3(0.08, 0.10, 0.14) : vec3(0.49, 0.58, 0.64);
+    c = mix(c, glass, band * (night ? 0.45 : 0.42));
+    if (night && band > 0.0 && hash(vec3(floor(f), floor(v_xy / 4.0)) + v_win.z) < 0.16)
+      glow = band * 0.85;
   }
-  o = vec4(c * lit(v_normal), v_color.a);
+  // Harder sun at night: lit faces stand apart from shaded ones.
+  float d = max(dot(n, SUN), 0.0);
+  float shade = night ? 0.42 + 0.7 * d : 0.6 + 0.4 * d;
+  // Lit windows glow whatever way the wall faces.
+  o = fog(vec4(mix(c * shade, vec3(0.88, 0.72, 0.46), glow), v_color.a));
 }`);
 
 const instProg = program(`${COMMON}
@@ -291,13 +307,14 @@ void main() {
   float a = a_inst.w - 3.14159265;
   mat2 r = mat2(cos(a), sin(a), -sin(a), cos(a));
   vec2 xy = r * a_pos.xy;
-  vec3 base = world(a_inst.xy, a_inst.z);
-  gl_Position = u_proj * vec4(base + vec3(xy, a_pos.z * a_scale) * u_tile.w, 1.0);
+  vec3 base = vec3(u_tile.xy + a_inst.xy * u_tile.z, a_inst.z * u_tile.w);
+  gl_Position = place(base + vec3(xy, a_pos.z * a_scale) * u_tile.w);
   v_color = a_color; v_normal = vec3(r * a_normal.xy, a_normal.z);
 }`,
 `${LIGHT}
+${FOG}
 in vec4 v_color; in vec3 v_normal; out vec4 o;
-void main() { o = vec4(v_color.rgb * lit(v_normal), v_color.a); }`);
+void main() { o = fog(vec4(v_color.rgb * lit(v_normal), v_color.a)); }`);
 
 // ---- Tiles ----------------------------------------------------------------
 const tiles = new Map();          // key -> tile record
@@ -360,46 +377,67 @@ async function loadTemplates() {
   return out;
 }
 
+// GTL2: see src/vtile.rs. Index width follows the vertex count.
+// Columnar attributes: [location, size, type, normalized, bytes per vertex],
+// each column padded to 4 bytes.
+function columns(count, list) {
+  let off = 0;
+  for (const [loc, size, type, norm, bytes] of list) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, type, norm, bytes, off);
+    off += (count * bytes + 3) & ~3;
+  }
+}
+const COLUMNS = { fill: [4, 4], line: [6, 2, 4, 4, 4, 2], mesh: [6, 2, 4, 2, 1] };
+const columnBytes = (count, cols) => cols.reduce((a, c) => a + ((count * c + 3) & ~3), 0);
+
 function parseTile(buf) {
-  const u32 = new Uint32Array(buf);
-  let at = 1;
-  const bg = u32[at++];
-  const section = (stride) => {
-    const v = u32[at++], i = u32[at++];
-    const verts = new Uint8Array(buf, at * 4, v * stride * 4); at += v * stride;
-    const idx = new Uint32Array(buf, at * 4, i); at += i;
+  const dv = new DataView(buf);
+  let at = 4;
+  const bg = dv.getUint32(at, true); at += 4;
+  const align = () => { at = (at + 3) & ~3; };
+  const section = (cols) => {
+    const v = dv.getUint32(at, true), i = dv.getUint32(at + 4, true); at += 8;
+    const n = columnBytes(v, cols);
+    const verts = new Uint8Array(buf, at, n); at += n;
+    const idx = v < 65536 ? new Uint16Array(buf, at, i) : new Uint32Array(buf, at, i);
+    at += idx.byteLength; align();
     return { v, i, verts, idx };
   };
-  const fills = section(3), lines = section(11), meshes = section(10);
-  const n = u32[at++];
-  const inst = new Float32Array(buf, at * 4, n * 6);
-  const instU = new Uint32Array(buf, at * 4, n * 6);
-  // Background quad in front of the fills.
-  const bgV = new Uint32Array(12), f = new Float32Array(bgV.buffer);
-  [[0, 0], [1, 0], [1, 1], [0, 1]].forEach(([u, v], k) => { f[k * 3] = u; f[k * 3 + 1] = v; bgV[k * 3 + 2] = bg; });
-  return { fills, lines, meshes, n, inst, instU, bgV };
+  const fills = section(COLUMNS.fill), lines = section(COLUMNS.line), meshes = section(COLUMNS.mesh);
+  const n = dv.getUint32(at, true); at += 4;
+  const inst = new Float32Array(buf, at, n * 6);
+  const instU = new Uint32Array(buf, at, n * 6);
+  return { fills, lines, meshes, n, inst, instU, bg };
 }
 
+const indexType = (idx) => idx instanceof Uint16Array ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
 function upload(t, d) {
-  const fv = new Uint8Array(d.bgV.byteLength + d.fills.verts.byteLength);
-  fv.set(new Uint8Array(d.bgV.buffer), 0); fv.set(d.fills.verts, d.bgV.byteLength);
-  const fi = new Uint32Array(6 + d.fills.i);
+  // A background quad goes first, merged into both fill columns.
+  const nv = d.fills.v, fv = new Uint8Array(columnBytes(nv + 4, COLUMNS.fill));
+  const fd = new DataView(fv.buffer), cOff = ((nv + 4) * 4 + 3) & ~3;
+  [[0, 0], [1, 0], [1, 1], [0, 1]].forEach(([u, v], k) => {
+    fd.setInt16(k * 4, u * 8192, true); fd.setInt16(k * 4 + 2, v * 8192, true); fd.setUint32(cOff + k * 4, d.bg, true);
+  });
+  fv.set(d.fills.verts.subarray(0, nv * 4), 16);
+  fv.set(d.fills.verts.subarray((nv * 4 + 3) & ~3, ((nv * 4 + 3) & ~3) + nv * 4), cOff + 16);
+  const fi = d.fills.v + 4 < 65536 ? new Uint16Array(6 + d.fills.i) : new Uint32Array(6 + d.fills.i);
   fi.set([0, 1, 2, 0, 2, 3]); fi.set(d.fills.idx.map((x) => x + 4), 6);
+  const S = gl.SHORT, US = gl.UNSIGNED_SHORT, B = gl.BYTE, UB = gl.UNSIGNED_BYTE, F = gl.FLOAT;
   t.fill = vao(() => [buffer(gl.ARRAY_BUFFER, fv), buffer(gl.ELEMENT_ARRAY_BUFFER, fi),
-    attribs(12, [[0, 2, gl.FLOAT, false, 0], [1, 4, gl.UNSIGNED_BYTE, true, 8]])]);
-  t.fillCount = fi.length;
+    columns(d.fills.v + 4, [[0, 2, S, false, 4], [1, 4, UB, true, 4]])]);
+  t.fillCount = fi.length; t.fillType = indexType(fi);
   if (d.lines.i) {
     t.line = vao(() => [buffer(gl.ARRAY_BUFFER, d.lines.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, d.lines.idx),
-      attribs(44, [[0, 3, gl.FLOAT, false, 0], [1, 2, gl.FLOAT, false, 12], [2, 1, gl.FLOAT, false, 20],
-        [3, 1, gl.FLOAT, false, 24], [4, 1, gl.FLOAT, false, 28], [5, 4, gl.UNSIGNED_BYTE, true, 32],
-        [6, 2, gl.FLOAT, false, 36]])]);
-    t.lineCount = d.lines.i;
+      columns(d.lines.v, [[0, 3, S, false, 6], [3, 1, US, false, 2], [2, 1, F, false, 4], [5, 4, UB, true, 4],
+        [6, 2, US, false, 4], [1, 2, B, false, 2]])]);
+    t.lineCount = d.lines.i; t.lineType = indexType(d.lines.idx);
   }
   if (d.meshes.i) {
     t.mesh = vao(() => [buffer(gl.ARRAY_BUFFER, d.meshes.verts), buffer(gl.ELEMENT_ARRAY_BUFFER, d.meshes.idx),
-      attribs(40, [[0, 3, gl.FLOAT, false, 0], [1, 3, gl.FLOAT, false, 12], [2, 4, gl.UNSIGNED_BYTE, true, 24],
-        [3, 3, gl.FLOAT, false, 28]])]);
-    t.meshCount = d.meshes.i;
+      columns(d.meshes.v, [[0, 3, S, false, 6], [4, 1, US, false, 2], [2, 4, UB, true, 4],
+        [5, 1, US, false, 2], [3, 1, UB, false, 1]])]);
+    t.meshCount = d.meshes.i; t.meshType = indexType(d.meshes.idx);
   }
   // Instances, grouped by template.
   t.inst = [];
@@ -451,7 +489,11 @@ function request(z, x, y) {
       t.ready = true;
       redraw();
     })
-    .catch(() => { if (tiles.get(k) === t) tiles.delete(k); })
+    .catch((e) => {
+      if (tiles.get(k) === t) tiles.delete(k);
+      // Retry on the next frame after a pause; aborts are deliberate.
+      if (e.name !== "AbortError") { console.warn(`tile ${k}:`, e); setTimeout(redraw, 1000); }
+    })
     .finally(() => { pending--; progress(); });
   return t;
 }
@@ -459,8 +501,25 @@ function progress() { $("progress").style.visibility = pending ? "visible" : "hi
 const SUN_ICON = '<path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM2 13h2a1 1 0 0 0 0-2H2a1 1 0 0 0 0 2zm18 0h2a1 1 0 0 0 0-2h-2a1 1 0 0 0 0 2zM11 2v2a1 1 0 0 0 2 0V2a1 1 0 0 0-2 0zm0 18v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-2 0zM5.99 4.58a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41L5.99 4.58zm12.37 12.37a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41l-1.06-1.06zm1.06-10.96a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06zM7.05 18.36a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06z"/>';
 const MOON_ICON = '<path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/>';
 
-// Picks tiles: finer near the camera, coarser toward the horizon.
+// Whether a tile overlaps the convex ground polygon `poly` (separating axes).
+function overlaps(x0, y0, x1, y1, poly) {
+  if (poly.length < 3) return true;
+  const xs = poly.map((p) => p[0]), ys = poly.map((p) => p[1]);
+  if (Math.max(...xs) < x0 || Math.min(...xs) > x1 || Math.max(...ys) < y0 || Math.min(...ys) > y1) return false;
+  const box = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const nx = a[1] - b[1], ny = b[0] - a[0];
+    const side = (p) => (p[0] - a[0]) * nx + (p[1] - a[1]) * ny;
+    const inner = side(poly[(i + 2) % poly.length]) >= 0;
+    if (box.every((p) => (side(p) >= 0) !== inner)) return false;
+  }
+  return true;
+}
+
+// Picks visible tiles: finer near the camera, coarser toward the horizon.
 function selectTiles() {
+  const ground = [[0, 0], [W, 0], [W, H], [0, H]].map(([sx, sy]) => screenToGround(sx, sy)).filter(Boolean);
   const corners = [[0, 0], [W, 0], [W, H], [0, H], [W / 2, 0], [0, H / 2], [W, H / 2]]
     .map(([sx, sy]) => screenToGround(sx, sy)).filter(Boolean);
   if (!corners.length) return [];
@@ -472,11 +531,12 @@ function selectTiles() {
   const out = [];
   const visit = (z, x, y) => {
     const n = 2 ** z, tx0 = x / n, ty0 = y / n, tx1 = (x + 1) / n, ty1 = (y + 1) / n;
-    if (tx1 < x0 || tx0 > x1 || ty1 < y0 || ty0 > y1) return;
+    if (tx1 < x0 || tx0 > x1 || ty1 < y0 || ty0 > y1 || !overlaps(tx0, ty0, tx1, ty1, ground)) return;
     // Distance from the camera to the nearest point of the tile.
     const nx = clamp(view.x, tx0, tx1), ny = clamp(view.y, ty0, ty1);
     const dx = (nx - view.x) * ws - cam[0], dy = (ny - view.y) * ws - cam[1];
     const dist = Math.hypot(dx, dy, cam[2]);
+    if (dist > D * FOG_END) return;
     const want = clamp(Math.round(view.z - Math.log2(Math.max(dist, D) / D)), 0, MAX_GEO);
     if (z < want && out.length < 400) {
       for (const [cx, cy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) visit(z + 1, x * 2 + cx, y * 2 + cy);
@@ -512,6 +572,13 @@ function tileUniforms(prog, t) {
   const ppm = ws / metersPerUnit((t.y + 0.5) / n);
   gl.uniform4f(prog.u.u_tile, (t.x / n - view.x) * ws, (t.y / n - view.y) * ws, ws / n, ppm);
 }
+// Haze toward the horizon; tiles past FOG_END are not loaded at all.
+const FOG_START = 1.6, FOG_END = 3.2;
+function fogUniforms(prog, bg) {
+  gl.uniform3fv(prog.u.u_cam, cameraPos());
+  gl.uniform2f(prog.u.u_fog, D * FOG_START, D * FOG_END);
+  gl.uniform3f(prog.u.u_bg, bg[0], bg[1], bg[2]);
+}
 function render() {
   frameNo++;
   constrain();
@@ -540,10 +607,11 @@ function render() {
   gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 2);
   gl.useProgram(fillProg.p);
   gl.uniformMatrix4fv(fillProg.u.u_proj, false, proj);
+  fogUniforms(fillProg, c);
   for (const t of list) {
     tileUniforms(fillProg, t);
     gl.bindVertexArray(t.fill.vao);
-    gl.drawElements(gl.TRIANGLES, t.fillCount, gl.UNSIGNED_INT, 0);
+    gl.drawElements(gl.TRIANGLES, t.fillCount, t.fillType, 0);
   }
   gl.disable(gl.POLYGON_OFFSET_FILL);
 
@@ -551,16 +619,18 @@ function render() {
   gl.depthFunc(gl.LEQUAL);
   gl.useProgram(meshProg.p);
   gl.uniformMatrix4fv(meshProg.u.u_proj, false, proj);
+  fogUniforms(meshProg, c);
   gl.uniform1f(meshProg.u.u_night, theme === "dark" ? 1 : 0);
   for (const t of list) {
     if (!t.mesh) continue;
     tileUniforms(meshProg, t);
     gl.bindVertexArray(t.mesh.vao);
-    gl.drawElements(gl.TRIANGLES, t.meshCount, gl.UNSIGNED_INT, 0);
+    gl.drawElements(gl.TRIANGLES, t.meshCount, t.meshType, 0);
   }
   if (view.z >= 15) {
     gl.useProgram(instProg.p);
     gl.uniformMatrix4fv(instProg.u.u_proj, false, proj);
+  fogUniforms(instProg, c);
     for (const t of list) {
       if (!t.inst) continue;
       tileUniforms(instProg, t);
@@ -575,12 +645,12 @@ function render() {
   gl.depthMask(false);
   gl.useProgram(lineProg.p);
   gl.uniformMatrix4fv(lineProg.u.u_proj, false, proj);
-  gl.uniform1f(lineProg.u.u_dpr, 1);
+  fogUniforms(lineProg, c);
   for (const t of list) {
     if (!t.line) continue;
     tileUniforms(lineProg, t);
     gl.bindVertexArray(t.line.vao);
-    gl.drawElements(gl.TRIANGLES, t.lineCount, gl.UNSIGNED_INT, 0);
+    gl.drawElements(gl.TRIANGLES, t.lineCount, t.lineType, 0);
   }
   gl.depthMask(true);
   gl.bindVertexArray(null);

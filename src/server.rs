@@ -74,6 +74,8 @@ struct Metrics {
     render_nanos: AtomicU64,
     empty: AtomicU64,
     skipped: AtomicU64,
+    geo_tiles: AtomicU64,
+    geo_bytes: AtomicU64,
 }
 
 /// A geometry tile for the WebGL viewer.
@@ -304,8 +306,15 @@ async fn geo(
     app.metrics.requests.fetch_add(1, Ordering::Relaxed);
     let key = GeoKey { theme, z, x, y };
     let immutable = version == app.version;
+    let sent = |bytes: &Bytes| {
+        app.metrics.geo_tiles.fetch_add(1, Ordering::Relaxed);
+        app.metrics
+            .geo_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    };
     if let Some(bytes) = app.geo_cache.get(&key).await {
         app.metrics.hits.fetch_add(1, Ordering::Relaxed);
+        sent(&bytes);
         return binary(bytes, immutable);
     }
     let work = app.clone().on_pool(move |app| {
@@ -318,7 +327,10 @@ async fn geo(
         ))
     });
     match app.geo_cache.try_get_with(key, work).await {
-        Ok(bytes) => binary(bytes, immutable),
+        Ok(bytes) => {
+            sent(&bytes);
+            binary(bytes, immutable)
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -361,6 +373,8 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
          # TYPE maps_render_seconds_total counter\nmaps_render_seconds_total {:.6}\n\
          # TYPE maps_empty_tiles_total counter\nmaps_empty_tiles_total {}\n\
          # TYPE maps_renders_skipped_total counter\nmaps_renders_skipped_total {}\n\
+         # TYPE maps_geo_tiles_total counter\nmaps_geo_tiles_total {}\n\
+         # TYPE maps_geo_bytes_total counter\nmaps_geo_bytes_total {}\n\
          # TYPE maps_cache_entries gauge\nmaps_cache_entries {}\n\
          # TYPE maps_cache_bytes gauge\nmaps_cache_bytes {}\n",
         m.requests.load(Ordering::Relaxed),
@@ -369,6 +383,8 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
         nanos as f64 / 1e9,
         m.empty.load(Ordering::Relaxed),
         m.skipped.load(Ordering::Relaxed),
+        m.geo_tiles.load(Ordering::Relaxed),
+        m.geo_bytes.load(Ordering::Relaxed),
         app.cache.entry_count(),
         app.cache.weighted_size(),
     );
