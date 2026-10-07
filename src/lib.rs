@@ -5,6 +5,7 @@
 //! any viewport with a [`style::Theme`], which [`output`] turns into XYZ tiles
 //! or one large poster image.
 
+pub mod api;
 pub mod assemble;
 pub mod classify;
 pub mod elevation;

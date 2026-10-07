@@ -98,6 +98,31 @@ swipe two fingers vertically to tilt. The URL hash
 Extracts for any region are available from
 [BBBike](https://extract.bbbike.org/) or [Geofabrik](https://download.geofabrik.de/).
 
+## API
+
+`maps serve` also exposes a JSON API under `/v1`, with interactive docs at
+`/v1/docs` and the OpenAPI 3.1 spec at `/v1/openapi.json`.
+
+| Path | Purpose |
+| --- | --- |
+| `/v1/info` | Bounds, center, data version, counts |
+| `/v1/kinds` | Feature kinds in the extract with counts |
+| `/v1/features?bbox=w,s,e,n&kind=building&page=1` | GeoJSON features in a box (paged) |
+| `/v1/features/{id}` | One feature |
+| `/v1/lookup?lat=&lon=&radius=` | What is at a point, tallest first |
+| `/v1/tallest?bbox=` | Tallest structures in a box |
+| `/v1/static?lat=&lon=&zoom=&bearing=&pitch=` | A 3D render as PNG |
+
+Features carry real attributes: `height_m`, `min_height_m`, `roof_shape`,
+`levels`, colours, `heading_deg` for street furniture, and a third
+coordinate (meters) on raised roads and rails. Errors are
+`{"detail": {"code", "message"}}`.
+
+```sh
+curl 'localhost:8080/v1/tallest?bbox=-74.016,40.704,-74.008,40.712&limit=3'
+curl -o fidi.png 'localhost:8080/v1/static?lat=40.7075&lon=-74.0115&zoom=17&bearing=29&pitch=50'
+```
+
 ## Deployment
 
 The binary is self-contained, pure Rust, and has no system dependencies
@@ -120,10 +145,11 @@ Endpoints:
 | `/geo/{version}/{theme}/{z}/{x}/{y}.bin` | Geometry tiles (gzip) |
 | `/models/{version}/{theme}.bin` | Model templates for instances |
 | `/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{y}[@2x].png` | Tiles. Immutable and cacheable forever, because `version` changes with the data. |
-| `/health` | Liveness probe (`ok`) |
+| `/healthz` | Liveness probe (`ok`); `maps check` probes it from inside the image |
 | `/metrics` | Prometheus counters: requests, cache hits, renders, render time, cache size |
 
-The server shuts down gracefully on SIGTERM.
+The server shuts down gracefully on SIGTERM. Pushes to `main` publish
+`ghcr.io/kensac/maps` (`latest` and `sha-<short>`).
 
 ## Performance
 

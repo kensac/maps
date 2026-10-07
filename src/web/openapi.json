@@ -1,0 +1,284 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "maps API",
+    "version": "1.0.0",
+    "description": "Query and render a 3D OpenStreetMap extract. Every physical feature (buildings with heights and roof shapes, roads with bridge elevations, street furniture with headings) is available as GeoJSON, and any view can be rendered to PNG at any bearing and pitch.\n\nErrors are `{\"detail\": {\"code\", \"message\"}}`. `code` is stable; `message` is for people.\n\nMap data (c) OpenStreetMap contributors, ODbL.",
+    "license": { "name": "MIT", "identifier": "MIT" }
+  },
+  "servers": [{ "url": "/" }],
+  "tags": [
+    { "name": "Data", "description": "Extract metadata and feature kinds" },
+    { "name": "Features", "description": "GeoJSON queries" },
+    { "name": "Render", "description": "Static images" }
+  ],
+  "paths": {
+    "/v1/info": {
+      "get": {
+        "tags": ["Data"],
+        "summary": "Extract info",
+        "operationId": "info",
+        "responses": {
+          "200": {
+            "description": "Bounds, center, data version and counts",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Info" } } }
+          }
+        }
+      }
+    },
+    "/v1/kinds": {
+      "get": {
+        "tags": ["Data"],
+        "summary": "Feature kinds with counts",
+        "description": "Every kind present in the extract, most common first. Use these names in `kind` filters.",
+        "operationId": "kinds",
+        "responses": {
+          "200": {
+            "description": "Kinds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["kinds"],
+                  "properties": {
+                    "kinds": { "type": "array", "items": { "$ref": "#/components/schemas/KindCount" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/features": {
+      "get": {
+        "tags": ["Features"],
+        "summary": "Features in a bounding box",
+        "description": "Features whose bounds meet the box, in draw order (ground first). Lines that leave the ground carry a third coordinate: elevation in meters.",
+        "operationId": "features",
+        "parameters": [
+          { "$ref": "#/components/parameters/Bbox" },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Comma-separated kinds, e.g. `building,street_lamp`",
+            "schema": { "type": "string" },
+            "example": "building"
+          },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "minimum": 1, "default": 1 } },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of features",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeaturePage" } } }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/features/{id}": {
+      "get": {
+        "tags": ["Features"],
+        "summary": "One feature",
+        "description": "Ids are stable for one data `version`.",
+        "operationId": "feature",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0 } }],
+        "responses": {
+          "200": {
+            "description": "The feature",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Feature" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/lookup": {
+      "get": {
+        "tags": ["Features"],
+        "summary": "What is here",
+        "description": "Areas containing the point and lines or objects within `radius` meters, tallest first (at most 50).",
+        "operationId": "lookup",
+        "parameters": [
+          { "$ref": "#/components/parameters/Lat" },
+          { "$ref": "#/components/parameters/Lon" },
+          { "name": "radius", "in": "query", "description": "Meters", "schema": { "type": "number", "minimum": 1, "maximum": 100, "default": 15 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching features",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeatureCollection" } } }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/tallest": {
+      "get": {
+        "tags": ["Features"],
+        "summary": "Tallest structures in a bounding box",
+        "operationId": "tallest",
+        "parameters": [
+          { "$ref": "#/components/parameters/Bbox" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Buildings and solids, tallest first",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FeatureCollection" } } }
+          },
+          "400": { "$ref": "#/components/responses/Invalid" }
+        }
+      }
+    },
+    "/v1/static": {
+      "get": {
+        "tags": ["Render"],
+        "summary": "Render a view to PNG",
+        "description": "Renders on the server in true 3D: buildings rise to their mapped heights, nearer things hide farther ones.",
+        "operationId": "static",
+        "parameters": [
+          { "$ref": "#/components/parameters/Lat" },
+          { "$ref": "#/components/parameters/Lon" },
+          { "name": "zoom", "in": "query", "required": true, "schema": { "type": "number", "minimum": 0, "maximum": 20 }, "example": 17 },
+          { "name": "bearing", "in": "query", "description": "Degrees clockwise from north", "schema": { "type": "number", "default": 0 } },
+          { "name": "pitch", "in": "query", "description": "Degrees from straight down", "schema": { "type": "number", "minimum": 0, "maximum": 60, "default": 0 } },
+          { "name": "width", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1280, "default": 640 } },
+          { "name": "height", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 1280, "default": 400 } },
+          { "name": "scale", "in": "query", "description": "Pixel ratio", "schema": { "type": "number", "minimum": 1, "maximum": 2, "default": 1 } },
+          { "name": "theme", "in": "query", "schema": { "type": "string", "enum": ["light", "dark"], "default": "light" } },
+          { "name": "buildings", "in": "query", "schema": { "type": "string", "enum": ["3d", "flat"], "default": "3d" } }
+        ],
+        "responses": {
+          "200": { "description": "PNG image", "content": { "image/png": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "$ref": "#/components/responses/Invalid" },
+          "429": {
+            "description": "Render slots are full; retry shortly",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Bbox": {
+        "name": "bbox",
+        "in": "query",
+        "required": true,
+        "description": "`west,south,east,north` in degrees; each side at most 0.05",
+        "schema": { "type": "string" },
+        "example": "-74.016,40.704,-74.008,40.710"
+      },
+      "Lat": { "name": "lat", "in": "query", "required": true, "schema": { "type": "number", "minimum": -85, "maximum": 85 }, "example": 40.7127 },
+      "Lon": { "name": "lon", "in": "query", "required": true, "schema": { "type": "number", "minimum": -180, "maximum": 180 }, "example": -74.0134 }
+    },
+    "responses": {
+      "Invalid": {
+        "description": "Bad parameters (`INVALID_REQUEST`)",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      },
+      "NotFound": {
+        "description": "No such feature (`NOT_FOUND`)",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "required": ["detail"],
+        "properties": {
+          "detail": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string", "enum": ["INVALID_REQUEST", "NOT_FOUND", "BUSY", "RENDER_FAILED"] },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+      "Info": {
+        "type": "object",
+        "required": ["version", "bounds", "center", "features", "vertices", "kinds", "tallest_m"],
+        "properties": {
+          "version": { "type": "string", "description": "Changes with the data; feature ids are stable within it" },
+          "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "west, south, east, north" },
+          "center": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "lon, lat" },
+          "features": { "type": "integer" },
+          "vertices": { "type": "integer" },
+          "kinds": { "type": "integer" },
+          "tallest_m": { "type": "number" }
+        }
+      },
+      "KindCount": {
+        "type": "object",
+        "required": ["kind", "geometry_type", "count"],
+        "properties": {
+          "kind": { "type": "string", "example": "building" },
+          "geometry_type": { "type": "string", "enum": ["point", "line", "polygon"] },
+          "count": { "type": "integer" }
+        }
+      },
+      "Properties": {
+        "type": "object",
+        "required": ["kind", "geometry_type"],
+        "properties": {
+          "kind": { "type": "string" },
+          "geometry_type": { "type": "string", "enum": ["point", "line", "polygon"] },
+          "layer": { "type": "integer" },
+          "bridge": { "type": "boolean" },
+          "tunnel": { "type": "boolean" },
+          "building_part": { "type": "boolean" },
+          "on_roof": { "type": "boolean" },
+          "height_m": { "type": "number", "description": "Top above ground" },
+          "min_height_m": { "type": "number", "description": "Bottom above ground" },
+          "roof_shape": { "type": "string", "enum": ["flat", "gabled", "hipped", "pyramidal", "skillion", "dome"] },
+          "levels": { "type": "number" },
+          "roof_colour": { "type": "string", "example": "#8a4b38" },
+          "facade_colour": { "type": "string" },
+          "heading_deg": { "type": "number", "description": "Compass direction the object faces" },
+          "max_elevation_m": { "type": "number", "description": "Highest deck point of a raised road or rail" }
+        }
+      },
+      "Feature": {
+        "type": "object",
+        "required": ["type", "id", "geometry", "properties"],
+        "properties": {
+          "type": { "const": "Feature" },
+          "id": { "type": "integer" },
+          "geometry": {
+            "type": "object",
+            "description": "GeoJSON geometry: Point, LineString, MultiLineString, Polygon or MultiPolygon",
+            "required": ["type", "coordinates"],
+            "properties": { "type": { "type": "string" }, "coordinates": { "type": "array" } }
+          },
+          "properties": { "$ref": "#/components/schemas/Properties" }
+        }
+      },
+      "FeatureCollection": {
+        "type": "object",
+        "required": ["type", "features"],
+        "properties": {
+          "type": { "const": "FeatureCollection" },
+          "features": { "type": "array", "items": { "$ref": "#/components/schemas/Feature" } }
+        }
+      },
+      "FeaturePage": {
+        "allOf": [
+          { "$ref": "#/components/schemas/FeatureCollection" },
+          {
+            "type": "object",
+            "required": ["page", "page_size", "total", "has_more"],
+            "properties": {
+              "page": { "type": "integer" },
+              "page_size": { "type": "integer" },
+              "total": { "type": "integer" },
+              "has_more": { "type": "boolean" }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

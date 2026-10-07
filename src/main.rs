@@ -64,6 +64,11 @@ enum Command {
         #[arg(long, default_value_t = 1024)]
         cache_mb: u64,
     },
+    /// Exit 0 if a local server answers /healthz (for container healthchecks).
+    Check {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: std::net::SocketAddr,
+    },
     /// Print statistics about an extract.
     Info {
         /// Input .osm.pbf file.
@@ -182,6 +187,7 @@ fn main() -> Result<()> {
                 },
             )
         }
+        Command::Check { addr } => check(addr),
         Command::Info { input } => {
             let map = load(&input)?;
             let (w, n) = unproject([map.bounds.min_x, map.bounds.min_y]);
@@ -200,4 +206,19 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// One HTTP/1.0 GET of /healthz; no client library needed.
+fn check(addr: std::net::SocketAddr) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+    s.set_read_timeout(Some(Duration::from_secs(3)))?;
+    s.write_all(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+    let mut reply = String::new();
+    s.read_to_string(&mut reply)?;
+    if !reply.starts_with("HTTP/1.1 200") && !reply.starts_with("HTTP/1.0 200") {
+        bail!("unhealthy: {}", reply.lines().next().unwrap_or(""));
+    }
+    Ok(())
 }

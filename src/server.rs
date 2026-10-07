@@ -430,6 +430,7 @@ pub fn serve(map: Map, opts: ServeOptions) -> Result<()> {
         empty: Default::default(),
         metrics: Metrics::default(),
     });
+    let api = crate::api::router(map, app.version.clone());
     let router = Router::new()
         .route("/", get(|| async { page(VIEWER) }))
         .route("/raster", get(|| async { page(RASTER_VIEWER) }))
@@ -437,12 +438,14 @@ pub fn serve(map: Map, opts: ServeOptions) -> Result<()> {
         .route("/models/{version}/{file}", get(models))
         .route("/meta.json", get(meta))
         .route("/health", get(|| async { "ok" }))
+        .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics))
         .route(
             "/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{file}",
             get(tile),
         )
-        .with_state(app);
+        .with_state(app)
+        .merge(api);
 
     // HTTP is light work; leave the cores to the rayon render pool.
     let runtime = tokio::runtime::Builder::new_multi_thread()
