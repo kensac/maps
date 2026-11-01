@@ -541,10 +541,10 @@ impl Renderer<'_> {
             return;
         }
         let at = [ground[0], ground[1] - f.base as f64 * fr.lift_per_m];
-        let c = self.theme.object(f.kind);
-        let mut m = model(f.kind, f.variant, h, &c, self.theme.trunk());
+        let c = self.theme.object(f.kind());
+        let mut m = model(f.kind(), f.variant, h, &c, self.theme.trunk());
         m.turn_to(f.heading as f64);
-        if f.kind == Kind::Tree && f.flags & flags::CONIFER != 0 {
+        if f.kind() == Kind::Tree && f.flags & flags::CONIFER != 0 {
             m = Mesh::new();
             tree(&mut m, h, true, &c, self.theme.trunk());
         }
@@ -562,8 +562,8 @@ impl Renderer<'_> {
             if !view.contains([x, y]) {
                 continue;
             }
-            let c = self.theme.object(f.kind);
-            let radius = match f.kind {
+            let c = self.theme.object(f.kind());
+            let radius = match f.kind() {
                 Kind::Tree => {
                     let r = ((0.3 * f.height as f64).max(1.2) * ppm).max(1.0);
                     oval(pixmap, x, y, r, c.body);

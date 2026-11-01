@@ -18,8 +18,8 @@ pyramid offline.
 ## Features
 
 **WebGL client, like Google Maps**
-- `maps serve` keeps the map in memory and builds geometry tiles on
-  request: styled, triangulated ground, road ribbons, buildings and model
+- `maps serve` maps the map from a snapshot (or builds it from an
+  extract) and builds geometry tiles on request: styled, triangulated ground, road ribbons, buildings and model
   instances (`src/vtile.rs`).
 - The browser draws every frame itself with WebGL2 and a perspective
   camera, so pan, zoom, rotate and tilt are smooth at 60 fps.
@@ -97,9 +97,12 @@ cargo build --release
 # Feature counts and bounds
 ./target/release/maps info nyc.osm.pbf
 
-# Build once into a snapshot; every command loads it in seconds
+# Build once into a snapshot; every command maps it from disk at once
 ./target/release/maps build us-northeast.osm.pbf -o northeast.snap
 ./target/release/maps serve northeast.snap
+
+# Convert an older MAPSNAP1 snapshot without rebuilding
+./target/release/maps convert old.snap northeast.snap
 ```
 
 In the viewer, drag to pan and scroll to zoom. Right-drag or Ctrl+drag
@@ -158,7 +161,7 @@ Endpoints:
 | `/models/{version}/{theme}.bin` | Model templates for instances |
 | `/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{y}[@2x].png` | Tiles. Immutable and cacheable forever, because `version` changes with the data. |
 | `/healthz` | Liveness probe (`ok`); `maps check` probes it from inside the image |
-| `/metrics` | Prometheus counters: requests, cache hits, renders, render time, geometry tiles and bytes sent, cache size |
+| `/metrics` | Prometheus counters: requests, cache hits, renders, render time, geometry tiles and bytes sent, and the size of the raster and geometry tile caches |
 
 The server shuts down gracefully on SIGTERM. Pushes to `main` publish
 `ghcr.io/kensac/maps` (`latest` and `sha-<short>`).
@@ -226,8 +229,8 @@ It classifies tags into physical kinds with real or typical dimensions
 - Turns coastlines into land.
 - Drops building outlines that are drawn through their parts, and lifts
   rooftop objects onto their buildings.
-- Sorts features into draw order and indexes them in one R-tree per zoom
-  bucket.
+- Sorts features into draw order and indexes them in one packed Hilbert
+  R-tree per zoom bucket (`src/index.rs`), stored in the snapshot.
 
 **Rendering** (`src/render/`) uses an orthographic camera with bearing and
 pitch. The ground is foreshortened by cos(pitch) and heights rise by

@@ -8,7 +8,7 @@ fn main() {
     let p = project(lon, lat);
     let mpu = meters_per_unit(p[1]);
     for f in &map.features {
-        if !(f.kind.is_extrusion() || f.kind.is_point()) {
+        if !(f.kind().is_extrusion() || f.kind().is_point()) {
             continue;
         }
         let cx = (f.bbox[0] + f.bbox[2]) as f64 / 2.0 + map.origin[0];
@@ -23,6 +23,6 @@ fn main() {
             (f.bbox[3] - f.bbox[1]) as f64 * mpu,
         );
         let (clon, clat) = unproject([cx, cy]);
-        println!("{:?} flags={} base={} top={} roof={:?} rh={} vis={} {w:.0}x{h:.0}m @{clon:.5},{clat:.5}", f.kind, f.flags, f.base, f.height, det.roof, det.roof_height, f.vis_zoom);
+        println!("{:?} flags={} base={} top={} roof={:?} rh={} vis={} {w:.0}x{h:.0}m @{clon:.5},{clat:.5}", f.kind(), f.flags, f.base, f.height, det.roof, det.roof_height, f.vis_zoom);
     }
 }

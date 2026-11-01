@@ -1,5 +1,6 @@
 # MAP=./nyc.osm.pbf docker compose up --build
-# The map lives in memory: NYC peaks near 3 GB loading, then about 1.7 GB plus cache.
+# Built from a .osm.pbf the map lives in memory (NYC peaks near 3 GB, then about
+# 1.7 GB plus cache). A snapshot (`maps build`) is mapped from disk instead.
 services:
   maps:
     build: .

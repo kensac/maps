@@ -198,10 +198,10 @@ impl Api {
 
     fn geometry(&self, f: &Feature) -> Value {
         let rings: Vec<&[[f32; 2]]> = self.map.rings(f).collect();
-        if f.kind.is_point() {
+        if f.kind().is_point() {
             return json!({ "type": "Point", "coordinates": self.lon_lat(rings[0][0]) });
         }
-        if !f.kind.is_area() {
+        if !f.kind().is_area() {
             let elev = self.map.elevations(f);
             let mut offset = 0;
             let lines: Vec<Value> = rings
@@ -255,8 +255,8 @@ impl Api {
 
     fn properties(&self, f: &Feature) -> Value {
         let mut p = json!({
-            "kind": kind_name(f.kind),
-            "geometry_type": geometry_type(f.kind),
+            "kind": kind_name(f.kind()),
+            "geometry_type": geometry_type(f.kind()),
         });
         let o = p.as_object_mut().unwrap();
         if f.layer != 0 {
@@ -272,13 +272,13 @@ impl Api {
                 o.insert(name.into(), json!(true));
             }
         }
-        if f.kind.is_extrusion() || f.kind.is_point() {
+        if f.kind().is_extrusion() || f.kind().is_point() {
             o.insert("height_m".into(), json!(round(f.height as f64, 2)));
             if f.base > 0.0 {
                 o.insert("min_height_m".into(), json!(round(f.base as f64, 2)));
             }
         }
-        if f.kind.is_extrusion() {
+        if f.kind().is_extrusion() {
             let d = self.map.detail(f);
             o.insert("roof_shape".into(), json!(roof_name(d.roof)));
             if d.levels > 0.0 {
@@ -416,7 +416,7 @@ async fn features(State(api): State<Shared>, Query(q): Query<FeaturesQuery>) -> 
         .query(bbox_area(&api, bbox))
         .into_iter()
         .filter(|&i| {
-            let k = map.features[i as usize].kind;
+            let k = map.features[i as usize].kind();
             k != Kind::Land && kinds.as_ref().is_none_or(|ks| ks.contains(&k))
         })
         .collect();
@@ -441,7 +441,7 @@ async fn features(State(api): State<Shared>, Query(q): Query<FeaturesQuery>) -> 
 
 async fn feature(State(api): State<Shared>, Path(id): Path<u32>) -> Response {
     match api.map.features.get(id as usize) {
-        Some(f) if f.kind != Kind::Land => ok(api.feature_json(id), 300),
+        Some(f) if f.kind() != Kind::Land => ok(api.feature_json(id), 300),
         _ => error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -471,10 +471,10 @@ async fn lookup(State(api): State<Shared>, Query(q): Query<LookupQuery>) -> Resp
     let mut hits: Vec<(f32, u32)> = Vec::new();
     for i in api.query([p[0] - r, p[1] - r, p[0] + r, p[1] + r]) {
         let f = &map.features[i as usize];
-        if f.kind == Kind::Land {
+        if f.kind() == Kind::Land {
             continue;
         }
-        let hit = if f.kind.is_area() {
+        let hit = if f.kind().is_area() {
             let pt = [p[0] as f64, p[1] as f64];
             let inside = map
                 .rings(f)
@@ -538,7 +538,7 @@ async fn tallest(State(api): State<Shared>, Query(q): Query<TallestQuery>) -> Re
     let mut ids: Vec<u32> = api
         .query(bbox_area(&api, bbox))
         .into_iter()
-        .filter(|&i| map.features[i as usize].kind.is_extrusion())
+        .filter(|&i| map.features[i as usize].kind().is_extrusion())
         .collect();
     ids.sort_by(|&a, &b| {
         let (fa, fb) = (&map.features[a as usize], &map.features[b as usize]);

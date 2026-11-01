@@ -363,6 +363,7 @@ async fn meta(State(app): State<Shared>) -> impl IntoResponse {
 
 async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
     app.cache.run_pending_tasks().await;
+    app.geo_cache.run_pending_tasks().await;
     let m = &app.metrics;
     let rendered = m.rendered.load(Ordering::Relaxed);
     let nanos = m.render_nanos.load(Ordering::Relaxed);
@@ -376,7 +377,9 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
          # TYPE maps_geo_tiles_total counter\nmaps_geo_tiles_total {}\n\
          # TYPE maps_geo_bytes_total counter\nmaps_geo_bytes_total {}\n\
          # TYPE maps_cache_entries gauge\nmaps_cache_entries {}\n\
-         # TYPE maps_cache_bytes gauge\nmaps_cache_bytes {}\n",
+         # TYPE maps_cache_bytes gauge\nmaps_cache_bytes {}\n\
+         # TYPE maps_geo_cache_entries gauge\nmaps_geo_cache_entries {}\n\
+         # TYPE maps_geo_cache_bytes gauge\nmaps_geo_cache_bytes {}\n",
         m.requests.load(Ordering::Relaxed),
         m.hits.load(Ordering::Relaxed),
         rendered,
@@ -387,6 +390,8 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
         m.geo_bytes.load(Ordering::Relaxed),
         app.cache.entry_count(),
         app.cache.weighted_size(),
+        app.geo_cache.entry_count(),
+        app.geo_cache.weighted_size(),
     );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }

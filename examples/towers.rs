@@ -4,7 +4,7 @@ fn main() {
     let map = maps::map::Map::build(maps::ingest::read(std::path::Path::new(&path)).unwrap());
     let mut seen = std::collections::BTreeMap::new();
     for f in &map.features {
-        if f.kind != maps::classify::Kind::Tower {
+        if f.kind() != maps::classify::Kind::Tower {
             continue;
         }
         let p = map.ring(f.ring_start)[0];

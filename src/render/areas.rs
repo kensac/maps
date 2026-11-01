@@ -62,10 +62,10 @@ impl Renderer<'_> {
     pub(super) fn draw_areas(&self, pixmap: &mut Pixmap, fr: &Frame, run: &[u32], s: &mut Scratch) {
         for batch in self.batches(run) {
             let f0 = &self.map.features[batch[0] as usize];
-            let Some(style) = self.theme.area(f0.kind, &fr.ctx) else {
+            let Some(style) = self.theme.area(f0.kind(), &fr.ctx) else {
                 continue;
             };
-            let bank = banks(f0.kind).filter(|b| b.depth * fr.lift_per_m >= 0.75);
+            let bank = banks(f0.kind()).filter(|b| b.depth * fr.lift_per_m >= 0.75);
             let depth = bank.as_ref().map_or(0.0, |b| b.depth * fr.lift_per_m);
             // Faces hang below edges; clip far enough out that faces from
             // artificial clip edges never reach into the view.

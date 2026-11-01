@@ -212,9 +212,9 @@ impl<'a> Renderer<'a> {
         let features = &self.map.features;
         run.chunk_by(move |&a, &b| {
             let (a, b) = (&features[a as usize], &features[b as usize]);
-            a.kind == b.kind
+            a.kind() == b.kind()
                 && a.flags == b.flags
-                && (a.kind != Kind::Boundary || a.height == b.height)
+                && (a.kind() != Kind::Boundary || a.height == b.height)
         })
     }
 }

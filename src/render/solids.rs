@@ -92,7 +92,7 @@ impl Renderer<'_> {
         run: &[u32],
         s: &mut Scratch,
     ) {
-        let split = run.partition_point(|&id| !self.map.features[id as usize].kind.is_point());
+        let split = run.partition_point(|&id| !self.map.features[id as usize].kind().is_point());
         let (solids, points) = run.split_at(split);
         if fr.ctx.zoom >= SHADOW_ZOOM {
             self.draw_shadows(pixmap, fr, solids, s);
@@ -114,7 +114,7 @@ impl Renderer<'_> {
     pub(super) fn draw_solid(&self, pixmap: &mut Pixmap, fr: &Frame, f: &Feature, s: &mut Scratch) {
         let detail = self.map.detail(f);
         let (mut base, top) = (f.base, f.height);
-        if f.kind == Kind::Canopy {
+        if f.kind() == Kind::Canopy {
             base = base.max(top - CANOPY_SLAB);
         }
         let mpu = fr.meters_per_unit();
@@ -141,7 +141,7 @@ impl Renderer<'_> {
         let facade_colour = detail.facade_colour;
         let facade = |light: f32| match facade_colour {
             Some(c) => self.theme.mapped_facade(c, light),
-            None => self.theme.facade(f.kind, light),
+            None => self.theme.facade(f.kind(), light),
         };
 
         let base_px = base as f64 * fr.lift_per_m;
@@ -175,7 +175,7 @@ impl Renderer<'_> {
         let floor_px = (eave_px - base_px) / floors;
         // Window bands fade in as floors grow from 2 to 4 pixels tall.
         let window_alpha = ((floor_px - 2.0) / 2.0).clamp(0.0, 1.0) as f32;
-        let windows = f.kind == Kind::Building && window_alpha > 0.0 && wall_m >= 2.5;
+        let windows = f.kind() == Kind::Building && window_alpha > 0.0 && wall_m >= 2.5;
 
         let mut walls: [Option<PathBuilder>; SHADES] = Default::default();
         let mut panes: [Option<PathBuilder>; SHADES] = Default::default();
@@ -230,7 +230,7 @@ impl Renderer<'_> {
                     }
                 }
             }
-            if f.kind == Kind::Canopy && r == 0 && base_px >= 2.0 {
+            if f.kind() == Kind::Canopy && r == 0 && base_px >= 2.0 {
                 let step = (n / 6).max(1);
                 posts.extend(s.pts.iter().step_by(step).copied());
             }
@@ -252,7 +252,7 @@ impl Renderer<'_> {
                     line_cap: LineCap::Butt,
                     ..Stroke::default()
                 };
-                let p = paint(self.theme.facade(f.kind, 0.0));
+                let p = paint(self.theme.facade(f.kind(), 0.0));
                 pixmap.stroke_path(&path, &p, &st, Transform::identity(), None);
             }
         }
@@ -278,7 +278,7 @@ impl Renderer<'_> {
 
         let roof_fill = roof_colour.unwrap_or_else(|| match roof {
             Some(_) => self.theme.pitched_roof(),
-            None => self.theme.roof(f.kind),
+            None => self.theme.roof(f.kind()),
         });
         match roof {
             None => {
@@ -381,7 +381,7 @@ pub(crate) fn roof_plan(
 ) -> Option<RoofPlan> {
     // Pitched roofs need a single, simple outline.
     if d.roof == RoofShape::Flat
-        || f.kind != Kind::Building
+        || f.kind() != Kind::Building
         || f.ring_count != 1
         || footprint.len() < 3
     {
