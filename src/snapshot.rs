@@ -177,24 +177,24 @@ pub fn save(map: &Map, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Maps `path` read-only for the rest of the process.
-fn map_file(path: &Path) -> Result<&'static [u8]> {
+/// Maps `path` read-only.
+fn map_file(path: &Path) -> Result<Mmap> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     // SAFETY: the file is opened read-only and is never modified while
     // mapped: snapshots are replaced by renaming a new file over them, which
     // leaves this one intact (see the module docs).
-    let mmap =
-        unsafe { Mmap::map(&file) }.with_context(|| format!("mapping {}", path.display()))?;
-    Ok(&Box::leak(Box::new(mmap))[..])
+    unsafe { Mmap::map(&file) }.with_context(|| format!("mapping {}", path.display()))
 }
 
 /// Loads a snapshot of either format.
 pub fn load(path: &Path) -> Result<Map> {
     let t = Instant::now();
-    let bytes = map_file(path)?;
-    let map = match bytes.get(..8) {
-        Some(m) if m == MAGIC => open_v2(bytes)?,
-        Some(m) if m == MAGIC_V1 => load_v1(bytes)?,
+    let mmap = map_file(path)?;
+    let map = match mmap.get(..8) {
+        // Borrowed for the rest of the process.
+        Some(m) if m == MAGIC => open_v2(&Box::leak(Box::new(mmap))[..])?,
+        // Copied, then unmapped.
+        Some(m) if m == MAGIC_V1 => load_v1(&mmap)?,
         _ => bail!("{} is not a map snapshot", path.display()),
     };
     let (heap, mapped) = map.storage();
@@ -393,7 +393,8 @@ fn load_v1(bytes: &[u8]) -> Result<Map> {
 /// counts are computed (about 45 bytes per feature of memory, briefly).
 pub fn convert(input: &Path, output: &Path) -> Result<()> {
     let t = Instant::now();
-    let bytes = map_file(input)?;
+    let mmap = map_file(input)?;
+    let bytes = &mmap[..];
     if bytes.get(..8) == Some(MAGIC) {
         bail!("{} is already a v2 snapshot", input.display());
     }

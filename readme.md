@@ -168,21 +168,40 @@ The server shuts down gracefully on SIGTERM. Pushes to `main` publish
 
 ### Large extracts
 
-Building the map from an extract briefly needs about twice the memory it
-serves with. `maps build` does that once and writes a snapshot, which every
-command accepts in place of the `.osm.pbf`:
+Building the map from an extract needs about twice the memory the map
+itself takes. `maps build` does that once and writes a snapshot, which every
+command accepts in place of the `.osm.pbf`. A snapshot is memory-mapped and
+used in place, spatial index included, so a server is up at once and holds
+only the pages tiles touch, which the kernel can drop again:
 
 | US Northeast (1.8 GB PBF, 25 M features) | From PBF | From snapshot |
 | --- | ---: | ---: |
-| Load time (M1 Pro) | 42 s | 3.5 s |
-| Peak memory | 12 GB | 5.7 GB |
+| Ready to serve | 72 s | 0.02 s |
+| Peak memory | 10 GB | 13 MB resident after start |
+| Anonymous memory after 180 tiles in five cities (Linux) | | 135 MB, plus 1.5 GB of file pages |
 
-Ingest keeps the build lean: node coordinates are written once into a
-packed 32-bit fixed-point array (about 1 cm), node references become
-32-bit indices so the IDs can be freed, raw ways are released as they are
-built, and the feature sort is in place.
+The snapshot is 4.3 GB, of which the index is 0.5 GB (21 bytes a feature).
+A tile that touches pages not yet read waits for the disk: in that test
+first renders took about twice as long as repeats.
 
-The snapshot is 3.8 GB. Serving it uses about 5.7 GB plus the tile cache.
+**Format.** `MAPSNAP2` (`src/snapshot.rs`): a fixed header (bounds, origin,
+background, tallest structure, and the offset and length of each section),
+then 64-byte-aligned sections: points, ring starts, features (56-byte
+records), roof and facade details (24-byte records), elevations, building
+groups, per-kind feature counts (so `/v1/kinds` needs no scan) and one packed
+Hilbert R-tree per zoom bucket (`src/index.rs`; 16 children a node, `f32`
+boxes, `u32` ids). Opening checks the header and every section's bounds and
+alignment; kind and roof bytes are read through checked accessors.
+
+**Older snapshots.** `MAPSNAP1` files still load, copied onto the heap with
+the index rebuilt (4.7 GB and 11 s for US Northeast). `maps convert old.snap
+new.snap` converts one in seconds without the extract, copying the arrays
+and building only the index (1.3 GB peak for US Northeast).
+
+**Replacing a snapshot.** A server reads the file as it runs, so never
+overwrite one in place: write the new file alongside and `mv` it over the
+old one (same filesystem), then restart. `maps build` and `maps convert`
+write `<output>.partial` and rename it themselves.
 
 ## Performance
 
@@ -192,7 +211,7 @@ Measured on an Apple M1 Pro (10 cores), release build.
 | --- | ---: | ---: | ---: |
 | JFK airport | 2.3 MB | 59 k | 0.12 s |
 | Manhattan + Brooklyn | 16 MB | 361 k | 0.34 s |
-| New York metro | 184 MB | 3.9 M | 4.5 s, then 1.7 GB resident |
+| New York metro | 184 MB | 3.9 M | 4.5 s, then 1.7 GB resident; from a snapshot (590 MB) at once, with a 70 MB footprint after 300 tile requests |
 
 Serving the NYC extract (Midtown, 512 px retina tiles at bearing 29° and
 pitch 45°, 16 concurrent clients):
