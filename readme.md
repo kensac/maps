@@ -176,8 +176,8 @@ only the pages tiles touch, which the kernel can drop again:
 
 | US Northeast (1.8 GB PBF, 25 M features) | From PBF | From snapshot |
 | --- | ---: | ---: |
-| Ready to serve | 72 s | 0.02 s |
-| Peak memory | 10 GB | 13 MB resident after start |
+| Ready to serve | 72 s | 0.04 s |
+| Peak memory | 10 GB | 3 MB, plus 200 MB of file pages read by the checks |
 | Anonymous memory after 180 tiles in five cities (Linux) | | 135 MB, plus 1.5 GB of file pages |
 
 The snapshot is 4.3 GB, of which the index is 0.5 GB (21 bytes a feature).
@@ -190,18 +190,29 @@ then 64-byte-aligned sections: points, ring starts, features (56-byte
 records), roof and facade details (24-byte records), elevations, building
 groups, per-kind feature counts (so `/v1/kinds` needs no scan) and one packed
 Hilbert R-tree per zoom bucket (`src/index.rs`; 16 children a node, `f32`
-boxes, `u32` ids). Opening checks the header and every section's bounds and
-alignment; kind and roof bytes are read through checked accessors.
+boxes, `u32` ids). Opening checks the header, every section's bounds and
+alignment, that ring starts are in order and end at the last point, and
+that the index has exactly the shape the builder writes, with every id in
+range. That reads the ring starts and index ids, about 200 MB for US
+Northeast (40 ms from the page cache). The 1.4 GB of feature records are not
+scanned: their kind and roof bytes go through checked accessors, and their
+ring, detail, elevation and group indices are bounds-checked where they are
+used, so a damaged feature draws nothing. A render that panics anyway fails
+its own request, not the server.
 
 **Older snapshots.** `MAPSNAP1` files still load, copied onto the heap with
-the index rebuilt (4.7 GB and 11 s for US Northeast). `maps convert old.snap
-new.snap` converts one in seconds without the extract, copying the arrays
-and building only the index (1.3 GB peak for US Northeast).
+the index rebuilt (5.3 GB peak, 4.7 GB after loading, for US Northeast).
+`maps convert old.snap new.snap` converts one in seconds without the
+extract, copying the arrays and building only the index (1.3 GB peak for US
+Northeast).
 
-**Replacing a snapshot.** A server reads the file as it runs, so never
-overwrite one in place: write the new file alongside and `mv` it over the
-old one (same filesystem), then restart. `maps build` and `maps convert`
-write `<output>.partial` and rename it themselves.
+**Replacing a snapshot.** A running server reads the file in place, so
+changing it under the server crashes it (SIGBUS) or serves garbage. Never
+`cp` over a snapshot or write into it. Write the new file next to it as
+`<name>.partial`, then `mv` it over the old one on the same filesystem (a
+rename leaves the old file intact for anyone still mapping it), then
+restart. `maps build` and `maps convert` already write `<output>.partial`
+and rename it, syncing both the file and its directory.
 
 ## Performance
 

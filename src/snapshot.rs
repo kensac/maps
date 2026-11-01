@@ -103,12 +103,32 @@ fn index_sections(index: &[Packed]) -> (Vec<u64>, Vec<&[u8]>, Vec<&[u8]>) {
 }
 
 /// Writes `parts` to `path` via a `.partial` file renamed into place, so a
-/// server mapping the old file never sees it change.
+/// server mapping the old file never sees it change. The partial file is
+/// removed on failure.
 fn write(path: &Path, parts: &Parts) -> Result<()> {
     let mut partial = path.as_os_str().to_owned();
     partial.push(".partial");
     let partial = PathBuf::from(partial);
-    let file = File::create(&partial).with_context(|| format!("creating {}", partial.display()))?;
+    let result = write_partial(&partial, parts).and_then(|()| {
+        std::fs::rename(&partial, path)
+            .with_context(|| format!("renaming {} into place", partial.display()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&partial);
+        return result;
+    }
+    // Make the rename itself durable.
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("syncing {}", dir.display()))
+}
+
+fn write_partial(partial: &Path, parts: &Parts) -> Result<()> {
+    let file = File::create(partial).with_context(|| format!("creating {}", partial.display()))?;
     let mut w = BufWriter::with_capacity(1 << 22, file);
     w.write_all(&[0u8; HEADER_BYTES])?;
     let mut pos = HEADER_BYTES;
@@ -144,9 +164,6 @@ fn write(path: &Path, parts: &Parts) -> Result<()> {
     w.write_all(bytemuck::bytes_of(&header))?;
     let file = w.into_inner().map_err(|e| e.into_error())?;
     file.sync_all()?;
-    drop(file);
-    std::fs::rename(&partial, path)
-        .with_context(|| format!("renaming {} into place", partial.display()))?;
     Ok(())
 }
 
@@ -194,7 +211,7 @@ pub fn load(path: &Path) -> Result<Map> {
         // Borrowed for the rest of the process.
         Some(m) if m == MAGIC => open_v2(&Box::leak(Box::new(mmap))[..])?,
         // Copied, then unmapped.
-        Some(m) if m == MAGIC_V1 => load_v1(&mmap)?,
+        Some(m) if m == MAGIC_V1 => load_v1(mmap)?,
         _ => bail!("{} is not a map snapshot", path.display()),
     };
     let (heap, mapped) = map.storage();
@@ -239,11 +256,18 @@ fn open_v2(bytes: &'static [u8]) -> Result<Map> {
     let boxes: &[[f32; 4]] = section(bytes, &h, INDEX_BOXES)?;
     let ids: &[u32] = section(bytes, &h, INDEX_IDS)?;
 
+    // Ring starts are read whole (4 bytes a ring): in order and ending at
+    // the last point, every ring is in bounds. Feature records (56 bytes
+    // each) are not scanned; their indices are checked where they are used.
     ensure!(
         ring_starts
             .last()
             .is_some_and(|&e| e as usize == points.len()),
         "ring starts do not end at the last point"
+    );
+    ensure!(
+        ring_starts.windows(2).all(|w| w[0] <= w[1]),
+        "ring starts are out of order"
     );
     ensure!(
         kind_counts.len() <= Kind::COUNT,
@@ -270,6 +294,7 @@ fn open_v2(bytes: &'static [u8]) -> Result<Map> {
             len as usize,
             Store::Mapped(&boxes[node..node + nodes]),
             Store::Mapped(&ids[node..node + nodes]),
+            features.len(),
         )?);
         node += nodes;
     }
@@ -369,22 +394,41 @@ impl V1<'_> {
     }
 }
 
-/// Reads a v1 snapshot onto the heap and rebuilds its index.
-fn load_v1(bytes: &[u8]) -> Result<Map> {
-    let v1 = parse_v1(bytes)?;
+/// Reads a v1 snapshot onto the heap, unmaps it, then rebuilds the index.
+fn load_v1(mmap: Mmap) -> Result<Map> {
+    let v1 = parse_v1(&mmap)?;
     v1.validate()?;
+    let (bounds, origin, background, max_height) =
+        (v1.bounds, v1.origin, v1.background, v1.max_height);
     let [points, ring_starts, features, details, elevations, groups] = v1.arrays;
-    Ok(Map::from_parts(
-        v1.bounds,
-        v1.origin,
-        v1.background,
+    let parts = (
         bytemuck::pod_collect_to_vec(points),
         bytemuck::pod_collect_to_vec(ring_starts),
         bytemuck::pod_collect_to_vec(features),
-        v1.max_height,
         bytemuck::pod_collect_to_vec(details),
         bytemuck::pod_collect_to_vec(elevations),
         bytemuck::pod_collect_to_vec(groups),
+    );
+    drop(mmap);
+    let (points, ring_starts, features, details, elevations, groups) = parts;
+    ensure!(
+        ring_starts
+            .last()
+            .is_some_and(|&e| e as usize == points.len())
+            && ring_starts.windows(2).all(|w| w[0] <= w[1]),
+        "ring starts are out of order or out of bounds"
+    );
+    Ok(Map::from_parts(
+        bounds,
+        origin,
+        background,
+        points,
+        ring_starts,
+        features,
+        max_height,
+        details,
+        elevations,
+        groups,
     ))
 }
 

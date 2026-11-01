@@ -742,7 +742,7 @@ impl Map {
         }
         let start = f.elev as usize;
         let n = self.rings(f).map(<[_]>::len).sum::<usize>();
-        self.elevations.get(start..start + n)
+        self.elevations.get(start..start.checked_add(n)?)
     }
 
     /// Roof and facade detail of a solid, if mapped.
@@ -753,12 +753,25 @@ impl Map {
             .unwrap_or_default()
     }
 
+    /// Ring `r`; empty if `r` is out of range. Snapshots check ring starts
+    /// when opened but not every feature's ring range (that would read all
+    /// of the features), so a damaged feature draws nothing.
     pub fn ring(&self, r: u32) -> &[[f32; 2]] {
-        let (a, b) = (
-            self.ring_starts[r as usize],
-            self.ring_starts[r as usize + 1],
-        );
-        &self.points[a as usize..b as usize]
+        let r = r as usize;
+        match (self.ring_starts.get(r), self.ring_starts.get(r + 1)) {
+            (Some(&a), Some(&b)) => self.points.get(a as usize..b as usize).unwrap_or(&[]),
+            _ => &[],
+        }
+    }
+
+    /// A point standing for the feature: the first vertex of its first
+    /// ring, or its bounding box's corner (the same point, for a point
+    /// object) if it has none.
+    pub fn first_point(&self, f: &Feature) -> [f32; 2] {
+        self.ring(f.ring_start)
+            .first()
+            .copied()
+            .unwrap_or([f.bbox[0], f.bbox[1]])
     }
 
     /// The ring with the largest area: the outline of a solid. Rings come
@@ -774,7 +787,7 @@ impl Map {
     }
 
     pub fn rings(&self, f: &Feature) -> impl Iterator<Item = &[[f32; 2]]> {
-        (f.ring_start..f.ring_start + f.ring_count).map(|r| self.ring(r))
+        (f.ring_start..f.ring_start.saturating_add(f.ring_count)).map(|r| self.ring(r))
     }
 
     /// Indices of features visible at `zoom` whose bounds intersect `area`

@@ -160,8 +160,11 @@ fn load(path: &Path) -> Result<Map> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // Headroom for deep work-stealing recursion over large tile sets.
+    // Renders catch their own panics; this keeps any other panic in a
+    // spawned job from aborting the process.
     rayon::ThreadPoolBuilder::new()
         .stack_size(8 << 20)
+        .panic_handler(|_| eprintln!("a pool job panicked"))
         .build_global()?;
     match cli.command {
         Command::Render {

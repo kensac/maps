@@ -73,7 +73,12 @@ fn synthetic(n: usize, seed: u64) -> Map {
         f.elev = u32::MAX;
         f.group = u32::MAX;
         f.heading = f32::NAN;
-        f.vis_zoom = r.next() * 23.0 - 1.0;
+        // Never visible: left out of the index, filtered by the reference.
+        f.vis_zoom = if i % 97 == 0 {
+            f32::NAN
+        } else {
+            r.next() * 23.0 - 1.0
+        };
         f.bbox = [x, y, x + size, y + size];
         if i % 7 == 0 {
             f.detail = details.len() as u32;
@@ -103,10 +108,22 @@ fn synthetic(n: usize, seed: u64) -> Map {
     )
 }
 
-fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("maps-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+/// A directory for one test's files, removed when the test ends.
+struct Temp(PathBuf);
+impl Temp {
+    fn new(test: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("maps-test-{}-{test}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Temp(dir)
+    }
+    fn path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn same_arrays(a: &Map, b: &Map) {
@@ -124,6 +141,26 @@ fn same_arrays(a: &Map, b: &Map) {
         (a.bounds, a.origin, a.background, a.max_height),
         (b.bounds, b.origin, b.background, b.max_height)
     );
+}
+
+/// The bounding box of every feature, in local coordinates.
+fn extent(map: &Map) -> [f32; 4] {
+    map.features.iter().fold(
+        [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ],
+        |e, f| {
+            [
+                e[0].min(f.bbox[0]),
+                e[1].min(f.bbox[1]),
+                e[2].max(f.bbox[2]),
+                e[3].max(f.bbox[3]),
+            ]
+        },
+    )
 }
 
 /// `query` agrees with the rstar reference over random boxes and zooms.
@@ -148,8 +185,9 @@ fn queries_match(map: &Map, reference: &Reference, mut r: Rng, area: [f32; 4], t
 
 #[test]
 fn convert_matches_save_and_reads_back() {
+    let tmp = Temp::new("convert_matches_save_and_reads_back");
     let map = synthetic(20_000, 0x2545f4914f6cdd1d);
-    let (v1, saved, converted) = (temp("a.snap1"), temp("b.snap"), temp("c.snap"));
+    let (v1, saved, converted) = (tmp.path("a.snap1"), tmp.path("b.snap"), tmp.path("c.snap"));
     save_v1(&map, &v1).unwrap();
     save(&map, &saved).unwrap();
     convert(&v1, &converted).unwrap();
@@ -158,7 +196,7 @@ fn convert_matches_save_and_reads_back() {
         std::fs::read(&saved).unwrap(),
         std::fs::read(&converted).unwrap()
     );
-    assert!(convert(&converted, &temp("d.snap")).is_err());
+    assert!(convert(&converted, &tmp.path("d.snap")).is_err());
 
     let from_v1 = load(&v1).unwrap();
     let from_v2 = load(&converted).unwrap();
@@ -176,12 +214,13 @@ fn convert_matches_save_and_reads_back() {
 
 #[test]
 fn damaged_files_are_errors() {
+    let tmp = Temp::new("damaged_files_are_errors");
     let map = synthetic(3000, 99);
-    let path = temp("damaged.snap");
+    let path = tmp.path("damaged.snap");
     save(&map, &path).unwrap();
     let good = std::fs::read(&path).unwrap();
     let try_load = |bytes: &[u8], name: &str| {
-        let p = temp(name);
+        let p = tmp.path(name);
         std::fs::write(&p, bytes).unwrap();
         load(&p).map(|_| ())
     };
@@ -194,16 +233,174 @@ fn damaged_files_are_errors() {
     bad[at] = bad[at].wrapping_add(4);
     assert!(try_load(&bad, "misaligned.snap").is_err());
     // An unknown kind in a v1 file is refused when read or converted.
-    let v1 = temp("badkind.snap1");
+    let v1 = tmp.path("badkind.snap1");
     save_v1(&map, &v1).unwrap();
     let mut b = std::fs::read(&v1).unwrap();
     let features_at = 61 + 8 + map.points.len() * 8 + 8 + map.ring_starts.len() * 4 + 8;
     b[features_at] = 255;
     assert!(try_load(&b, "badkind2.snap1").is_err());
+
+    // Damaged index and ring starts are refused at open, not at query time.
+    let h: Header = bytemuck::pod_read_unaligned(&good[..std::mem::size_of::<Header>()]);
+    let u32_at = |s: usize, i: usize| h.sections[s][0] as usize + 4 * i;
+    let put = |bytes: &mut Vec<u8>, at: usize, v: u32| {
+        bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    };
+    let lens: Vec<u64> = (0..=MAX_BUCKET)
+        .map(|b| {
+            let at = h.sections[INDEX_LENS][0] as usize + 8 * b;
+            u64::from_le_bytes(good[at..at + 8].try_into().unwrap())
+        })
+        .collect();
+    // The first internal node of the first bucket that has one.
+    let mut node = 0;
+    let mut internal = None;
+    for &len in &lens {
+        let nodes = *index::levels(len as usize).last().unwrap() as usize;
+        if len as usize > NODE_SIZE {
+            internal = Some((node, node + len as usize));
+            break;
+        }
+        node += nodes;
+    }
+    let (leaf, internal) = internal.expect("a bucket with internal nodes");
+    let n = map.features.len() as u32;
+    for (what, at, v, error) in [
+        (
+            "leaf id past the features",
+            u32_at(INDEX_IDS, leaf),
+            n,
+            "past the",
+        ),
+        (
+            "internal id past the end",
+            u32_at(INDEX_IDS, internal),
+            u32::MAX,
+            "points at",
+        ),
+        (
+            "internal node pointing at itself",
+            u32_at(INDEX_IDS, internal),
+            (internal - node) as u32,
+            "points at",
+        ),
+        (
+            "ring start past the points",
+            u32_at(RING_STARTS, 1),
+            u32::MAX,
+            "ring starts",
+        ),
+    ] {
+        let mut bad = good.clone();
+        put(&mut bad, at, v);
+        match try_load(&bad, "bad.snap") {
+            Ok(()) => panic!("{what} was accepted"),
+            Err(e) => assert!(format!("{e:#}").contains(error), "{what}: {e:#}"),
+        }
+    }
 }
 
 /// v1 records, as v1 wrote them field by field, read as v2's `Feature`
 /// and `DetailRec`: the conversion copies them byte for byte.
+/// A v1 snapshot written by the last v1 build (bb62e44) from
+/// `times-square.osm.pbf` (a block of Midtown; data © OpenStreetMap
+/// contributors, ODbL). Reads with the counts that build's `maps info`
+/// printed, converts to the same arrays, and this build's v1 writer
+/// reproduces it byte for byte from the same extract.
+#[test]
+fn old_v1_snapshot_reads_and_converts() {
+    let tmp = Temp::new("old_v1_snapshot_reads_and_converts");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let v1 = fixture.join("times-square.v1.snap");
+    let old = load(&v1).unwrap();
+    assert_eq!((old.features.len(), old.points.len()), (195, 1454));
+    let names: Vec<(String, usize)> = old
+        .stats()
+        .into_iter()
+        .map(|(k, n)| (format!("{k:?}"), n))
+        .collect();
+    let want = [
+        ("Building", 89),
+        ("Footway", 42),
+        ("Kerb", 17),
+        ("Subway", 11),
+        ("TrafficSignal", 10),
+        ("Secondary", 9),
+        ("PedestrianStreet", 3),
+        ("Minor", 3),
+        ("Bench", 3),
+        ("WasteBasket", 3),
+        ("PedestrianArea", 2),
+        ("Service", 2),
+        ("BicycleParking", 1),
+    ];
+    let mut got = names.clone();
+    let mut want: Vec<(String, usize)> = want.iter().map(|&(k, n)| (k.to_string(), n)).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+
+    let v2 = tmp.path("times-square.snap");
+    convert(&v1, &v2).unwrap();
+    let new = load(&v2).unwrap();
+    same_arrays(&old, &new);
+    let reference = Reference::new(&old);
+    queries_match(&new, &reference, Rng(3), extent(&old), 2000);
+
+    let built = Map::build(crate::ingest::read(&fixture.join("times-square.osm.pbf")).unwrap());
+    let rewritten = tmp.path("rewritten.snap1");
+    save_v1(&built, &rewritten).unwrap();
+    assert_eq!(
+        std::fs::read(&rewritten).unwrap(),
+        std::fs::read(&v1).unwrap()
+    );
+}
+
+/// Feature records are not scanned at open, so out-of-range ring, detail,
+/// elevation and group indices must draw nothing rather than panic.
+#[test]
+fn damaged_features_render_without_panicking() {
+    use crate::render::{Buildings, Renderer, Viewport};
+    let tmp = Temp::new("damaged_features_render_without_panicking");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let v2 = tmp.path("ts.snap");
+    convert(&fixture.join("times-square.v1.snap"), &v2).unwrap();
+    let mut bytes = std::fs::read(&v2).unwrap();
+    let h: Header = bytemuck::pod_read_unaligned(&bytes[..std::mem::size_of::<Header>()]);
+    let [at, n] = h.sections[FEATURES];
+    for i in 0..n as usize {
+        let f = at as usize + 56 * i;
+        // ring_start, ring_count, detail, elev, group
+        let v = [u32::MAX - 1, 5, 1 << 30, u32::MAX - 2, 1 << 30];
+        for (k, v) in v.iter().enumerate() {
+            bytes[f + 4 + 4 * k..f + 8 + 4 * k].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    std::fs::write(&v2, &bytes).unwrap();
+    let map = load(&v2).unwrap();
+    let b = map.bounds;
+    for z in [14u8, 16, 18] {
+        let n = (1u64 << z) as f64;
+        let x = (b.center()[0] * n) as u32;
+        let y = (b.center()[1] * n) as u32;
+        for theme in [
+            crate::style::ThemeName::Light,
+            crate::style::ThemeName::Dark,
+        ] {
+            let t = theme.theme();
+            for buildings in [Buildings::Flat, Buildings::Extruded] {
+                for pitch in [0.0, 45.0] {
+                    let vp = Viewport::camera_tile(z, x as i64, y as i64, 1.0, 20.0, pitch);
+                    Renderer::new(&map, t, buildings).render(&vp);
+                }
+            }
+            let gz = z.min(crate::vtile::MAX_ZOOM);
+            let shift = z - gz;
+            crate::vtile::build(&map, t, gz, x >> shift, y >> shift);
+        }
+    }
+}
+
 #[test]
 fn v1_records_are_v2_records() {
     let mut out = vec![Kind::Building as u8, 3, (-2i8) as u8, 1];
@@ -261,7 +458,9 @@ fn invalid_bytes_read_safely() {
 fn trees_use_node_size() {
     let map = synthetic(NODE_SIZE * NODE_SIZE + 3, 5);
     let total: usize = map.index.iter().map(|t| t.len()).sum();
-    assert_eq!(total, map.features.len());
+    let visible = map.features.iter().filter(|f| !f.vis_zoom.is_nan()).count();
+    assert!(visible < map.features.len());
+    assert_eq!(total, visible);
 }
 
 /// On a real extract: `MAPS_TEST_PBF=jfk.osm.pbf cargo test --release real_
@@ -269,6 +468,7 @@ fn trees_use_node_size() {
 /// byte-identical. Skipped without the variable.
 #[test]
 fn real_extract_v1_and_v2_agree() {
+    let tmp = Temp::new("real_extract_v1_and_v2_agree");
     let Ok(pbf) = std::env::var("MAPS_TEST_PBF") else {
         eprintln!("MAPS_TEST_PBF not set; skipped");
         return;
@@ -277,7 +477,7 @@ fn real_extract_v1_and_v2_agree() {
     use crate::style::ThemeName;
 
     let built = Map::build(crate::ingest::read(Path::new(&pbf)).unwrap());
-    let (v1, v2) = (temp("real.snap1"), temp("real.snap"));
+    let (v1, v2) = (tmp.path("real.snap1"), tmp.path("real.snap"));
     save_v1(&built, &v1).unwrap();
     drop(built);
     convert(&v1, &v2).unwrap();
@@ -286,20 +486,7 @@ fn real_extract_v1_and_v2_agree() {
     same_arrays(&a, &b);
 
     let reference = Reference::new(&a);
-    let mut extent = [
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    ];
-    for f in a.features.iter() {
-        extent = [
-            extent[0].min(f.bbox[0]),
-            extent[1].min(f.bbox[1]),
-            extent[2].max(f.bbox[2]),
-            extent[3].max(f.bbox[3]),
-        ];
-    }
+    let extent = extent(&a);
     queries_match(&b, &reference, Rng(0xdeadbeef), extent, 20_000);
     eprintln!("20000 random queries agree");
 
@@ -358,6 +545,4 @@ fn real_extract_v1_and_v2_agree() {
         "{tiles} raster tiles ({drawn} with features) and {} geo tiles identical",
         tiles / 2
     );
-    std::fs::remove_file(v1).unwrap();
-    std::fs::remove_file(v2).unwrap();
 }

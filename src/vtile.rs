@@ -935,7 +935,7 @@ fn tree_row(b: &mut Buffers, tf: &TileFrame, feat: &Feature, pts: &[[f64; 3]], d
 
 /// A point object as an instance, if its anchor lies in this tile.
 fn instance(b: &mut Buffers, map: &Map, tf: &TileFrame, feat: &Feature) {
-    let p = tf.uv(map.ring(feat.ring_start)[0]);
+    let p = tf.uv(map.first_point(feat));
     if !(0.0..1.0).contains(&p[0]) || !(0.0..1.0).contains(&p[1]) {
         return;
     }

@@ -7,7 +7,7 @@ fn main() {
         if f.kind() != maps::classify::Kind::Tower {
             continue;
         }
-        let p = map.ring(f.ring_start)[0];
+        let p = map.first_point(f);
         let (lon, lat) =
             maps::geo::unproject([p[0] as f64 + map.origin[0], p[1] as f64 + map.origin[1]]);
         let e = seen

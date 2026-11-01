@@ -531,7 +531,7 @@ impl Renderer<'_> {
 
     /// A point object, drawn from its bespoke model.
     pub(super) fn draw_prop(&self, pixmap: &mut Pixmap, fr: &Frame, f: &Feature) {
-        let p = self.map.ring(f.ring_start)[0];
+        let p = self.map.first_point(f);
         let ground = fr.apply(p[0] as f64, p[1] as f64);
         let h = (f.height - f.base).max(0.1) as f64;
         // Skip objects that cannot reach the view.
@@ -557,7 +557,7 @@ impl Renderer<'_> {
         let view = fr.rect(8.0);
         for &id in ids {
             let f = &self.map.features[id as usize];
-            let p = self.map.ring(f.ring_start)[0];
+            let p = self.map.first_point(f);
             let [x, y] = fr.apply(p[0] as f64, p[1] as f64);
             if !view.contains([x, y]) {
                 continue;

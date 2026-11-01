@@ -113,12 +113,16 @@ impl Packed {
         }
     }
 
-    /// A tree from stored arrays, checked enough that queries cannot index
-    /// out of bounds.
+    /// A tree from stored arrays, refused unless it is exactly the shape
+    /// [`Packed::build`] writes: every internal node points at the first of
+    /// its own children, and every item id is below `items`. A query then
+    /// stays in bounds and terminates. Reads the whole id array (4 bytes a
+    /// node), not the boxes.
     pub fn from_parts(
         len: usize,
         boxes: Store<[f32; 4]>,
         ids: Store<u32>,
+        items: usize,
     ) -> anyhow::Result<Packed> {
         let levels = levels(len);
         let total = *levels.last().unwrap() as usize;
@@ -127,6 +131,22 @@ impl Packed {
             "index has {} nodes, expected {total}",
             boxes.len()
         );
+        if let Some(bad) = ids[..len].iter().find(|&&id| id as usize >= items) {
+            anyhow::bail!("index item {bad} is past the {items} features");
+        }
+        let mut below = 0;
+        for w in levels.windows(2) {
+            let (start, end) = (w[0] as usize, w[1] as usize);
+            for (k, &id) in ids[start..end].iter().enumerate() {
+                let want = below + k * NODE_SIZE;
+                anyhow::ensure!(
+                    id as usize == want,
+                    "index node {} points at {id}, expected {want}",
+                    start + k
+                );
+            }
+            below = start;
+        }
         Ok(Packed {
             len,
             levels,

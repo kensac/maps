@@ -635,8 +635,9 @@ async fn static_map(State(api): State<Shared>, Query(q): Query<StaticQuery>) -> 
             return;
         }
         let t = Instant::now();
-        let renderer = Renderer::new(map, theme.theme(), buildings);
-        let png = encode_png(&renderer.render(&vp));
+        let png = crate::server::contained(|| {
+            encode_png(&Renderer::new(map, theme.theme(), buildings).render(&vp))
+        });
         let _ = tx.send(png.map(|b| (b, t.elapsed())));
     });
     match rx.await {
