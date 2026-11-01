@@ -4,37 +4,37 @@
 use crate::assemble::{
     assemble_coastlines, assemble_rings, land_polygons, orient_rings, Background,
 };
-use crate::classify::{flags, Detail, Group, Kind};
+use crate::classify::{flags, Detail, Group, Kind, RoofShape};
 use crate::geo::{signed_area2, Point, Rect, TILE_SIZE};
+use crate::index::Packed;
 use crate::ingest::RawData;
+use crate::store::Store;
+use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
 use rstar::primitives::{GeomWithData, Rectangle};
-use rstar::{RTree, AABB};
+use rstar::RTree;
 use std::time::Instant;
 
 /// Highest zoom bucket in the index; anything visible later shares it.
-const MAX_BUCKET: usize = 20;
+pub const MAX_BUCKET: usize = 20;
 
-#[derive(Clone, Copy, Debug)]
+/// A feature as stored, in memory and in snapshots alike: plain numbers in a
+/// fixed layout, so a mapped snapshot is used in place. The kind is a raw
+/// byte read through [`Feature::kind`], since a mapped file could hold any
+/// value and an invalid enum is undefined behaviour.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Feature {
-    pub kind: Kind,
+    kind: u8,
     pub flags: u8,
     pub layer: i8,
+    /// Model variant of a point object (e.g. a tower's type).
+    pub variant: u8,
     /// Index of the first ring in [`Map::ring_starts`].
     pub ring_start: u32,
     pub ring_count: u32,
-    /// Top above the ground in meters (admin level for boundaries).
-    pub height: f32,
-    /// Bottom above the ground in meters: `min_height`, or the roof an
-    /// object stands on.
-    pub base: f32,
     /// Index into [`Map::details`] for solids with roof/facade detail.
     pub detail: u32,
-    /// Model variant of a point object (e.g. a tower's type).
-    pub variant: u8,
-    /// Compass heading (radians) a point object's front faces; `NaN` when
-    /// it has no particular orientation.
-    pub heading: f32,
     /// For roads and rails that leave the ground: offset into
     /// [`Map::elevations`] of their per-vertex elevations; `u32::MAX` if they
     /// stay on the ground.
@@ -42,6 +42,14 @@ pub struct Feature {
     /// For a `building:part`: index into [`Map::groups`], the footprint of
     /// the building it belongs to; `u32::MAX` otherwise.
     pub group: u32,
+    /// Top above the ground in meters (admin level for boundaries).
+    pub height: f32,
+    /// Bottom above the ground in meters: `min_height`, or the roof an
+    /// object stands on.
+    pub base: f32,
+    /// Compass heading (radians) a point object's front faces; `NaN` when
+    /// it has no particular orientation.
+    pub heading: f32,
     /// Zoom from which the feature is drawn: its kind's minimum zoom, or the
     /// zoom at which it grows past a pixel, whichever is later.
     pub vis_zoom: f32,
@@ -49,13 +57,78 @@ pub struct Feature {
     pub bbox: [f32; 4],
 }
 
+const _: () = assert!(std::mem::size_of::<Feature>() == 56);
+
 impl Feature {
+    /// What the feature is. Snapshot writers check every kind byte, so the
+    /// fallback only keeps a damaged file from being undefined behaviour.
+    pub fn kind(&self) -> Kind {
+        Kind::from_u8(self.kind).unwrap_or(Kind::Land)
+    }
+
+    pub(crate) fn raw_kind(&self) -> u8 {
+        self.kind
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_kind(&mut self, kind: Kind) {
+        self.kind = kind as u8;
+    }
+
     pub fn group(&self) -> Group {
-        self.kind.group(self.layer, self.flags)
+        self.kind().group(self.layer, self.flags)
     }
 }
 
-type Entry = GeomWithData<Rectangle<[f32; 2]>, u32>;
+/// [`Detail`] as stored: `roof` and `across` are raw bytes, decoded (and
+/// checked) by [`DetailRec::get`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct DetailRec {
+    roof: u8,
+    across: u8,
+    /// Bit 0: `roof_colour` is set; bit 1: `facade_colour` is.
+    present: u8,
+    _pad: u8,
+    roof_height: f32,
+    levels: f32,
+    roof_colour: u32,
+    facade_colour: u32,
+    _pad2: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<DetailRec>() == 24);
+
+impl DetailRec {
+    pub fn new(d: &Detail) -> Self {
+        DetailRec {
+            roof: d.roof as u8,
+            across: d.across as u8,
+            present: d.roof_colour.is_some() as u8 | (d.facade_colour.is_some() as u8) << 1,
+            _pad: 0,
+            roof_height: d.roof_height,
+            levels: d.levels,
+            roof_colour: d.roof_colour.unwrap_or(0),
+            facade_colour: d.facade_colour.unwrap_or(0),
+            _pad2: 0,
+        }
+    }
+
+    pub(crate) fn raw_roof(&self) -> u8 {
+        self.roof
+    }
+
+    pub fn get(&self) -> Detail {
+        Detail {
+            roof: RoofShape::from_u8(self.roof).unwrap_or_default(),
+            across: self.across != 0,
+            roof_colour: (self.present & 1 != 0).then_some(self.roof_colour),
+            facade_colour: (self.present & 2 != 0).then_some(self.facade_colour),
+            roof_height: self.roof_height,
+            levels: self.levels,
+        }
+    }
+}
 
 pub struct Map {
     /// Data extent in normalized Mercator coordinates.
@@ -63,22 +136,25 @@ pub struct Map {
     /// Local coordinates are `world - origin`, stored as `f32`.
     pub origin: Point,
     pub background: Background,
-    pub points: Vec<[f32; 2]>,
+    pub points: Store<[f32; 2]>,
     /// Ring `r` spans `points[ring_starts[r]..ring_starts[r + 1]]`.
-    pub ring_starts: Vec<u32>,
+    pub ring_starts: Store<u32>,
     /// Sorted in draw order.
-    pub features: Vec<Feature>,
+    pub features: Store<Feature>,
     /// Top of the tallest structure, in meters.
     pub max_height: f32,
     /// Roof and facade detail of solids, indexed by [`Feature::detail`].
-    pub details: Vec<Detail>,
+    pub details: Store<DetailRec>,
     /// Per-vertex elevations (meters) of raised roads and rails, smoothed
     /// into ramps; see [`crate::elevation`].
-    pub elevations: Vec<f32>,
+    pub elevations: Store<f32>,
     /// Bounding boxes of buildings drawn through their parts, indexed by
     /// [`Feature::group`]: parts of one building sort together.
-    pub groups: Vec<[f32; 4]>,
-    index: Vec<RTree<Entry>>,
+    pub groups: Store<[f32; 4]>,
+    /// Features per kind, indexed by discriminant.
+    pub(crate) kind_counts: Vec<u64>,
+    /// One tree per zoom bucket; see [`build_index`].
+    pub(crate) index: Vec<Packed>,
 }
 
 /// Per-feature attributes passed through map building.
@@ -215,7 +291,7 @@ impl Chunk {
         };
         self.features.push((
             Feature {
-                kind,
+                kind: kind as u8,
                 flags,
                 layer,
                 ring_start,
@@ -290,7 +366,7 @@ fn contains(rings: &[&[[f32; 2]]], p: [f32; 2]) -> bool {
 /// from the ground; antennas, masts, flagpoles and tanks stand on top.
 fn stands_on_roofs(f: &Feature) -> bool {
     use crate::classify::TowerType;
-    match f.kind {
+    match f.kind() {
         Kind::Tower => matches!(
             TowerType::from_u8(f.variant),
             TowerType::Generic | TowerType::Monopole | TowerType::Lattice | TowerType::Guyed
@@ -332,7 +408,7 @@ fn place_structures(
     let buildings: Vec<GeomWithData<Rectangle<[f32; 2]>, usize>> = features
         .iter()
         .enumerate()
-        .filter(|(_, (f, _))| f.kind == Kind::Building)
+        .filter(|(_, (f, _))| f.kind() == Kind::Building)
         .map(|(i, (f, _))| {
             let r = Rectangle::from_corners([f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[3]]);
             GeomWithData::new(r, i)
@@ -572,7 +648,7 @@ impl Map {
         let groups = place_structures(&mut features, &map_points, &ring_starts, &details);
         let max_height = features
             .iter()
-            .filter(|(f, _)| f.kind.is_extrusion() || f.kind.is_point())
+            .filter(|(f, _)| f.kind().is_extrusion() || f.kind().is_point())
             .map(|(f, _)| f.height)
             .fold(0.0_f32, f32::max);
 
@@ -591,35 +667,33 @@ impl Map {
             let rank = if g == Group::Areas {
                 u32::MAX - area.to_bits()
             } else {
-                f.kind as u32
+                f.kind() as u32
             };
             (
                 g,
                 layer,
-                f.kind == Kind::Water,
+                f.kind() == Kind::Water,
                 rank,
-                f.kind,
+                f.kind(),
                 f.flags,
                 f.ring_start,
             )
         });
         let features: Vec<Feature> = features.into_iter().map(|(f, _)| f).collect();
 
-        let index = build_index(&features);
-
-        let map = Map {
+        let details: Vec<DetailRec> = details.iter().map(DetailRec::new).collect();
+        let map = Map::from_parts(
             bounds,
             origin,
             background,
-            points: map_points,
+            map_points,
             ring_starts,
             features,
             max_height,
             details,
             elevations,
             groups,
-            index,
-        };
+        );
         eprintln!(
             "  built {} features, {} vertices ({:.2?})",
             map.features.len(),
@@ -629,7 +703,7 @@ impl Map {
         map
     }
 
-    /// A map from its parts, as read back from a snapshot.
+    /// A map from owned parts, indexing it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         bounds: Rect,
@@ -639,22 +713,24 @@ impl Map {
         ring_starts: Vec<u32>,
         features: Vec<Feature>,
         max_height: f32,
-        details: Vec<Detail>,
+        details: Vec<DetailRec>,
         elevations: Vec<f32>,
         groups: Vec<[f32; 4]>,
     ) -> Map {
-        let index = build_index(&features);
+        let index = build_index(features.iter().copied());
+        let kind_counts = count_kinds(features.iter().copied());
         Map {
             bounds,
             origin,
             background,
-            points,
-            ring_starts,
-            features,
+            points: points.into(),
+            ring_starts: ring_starts.into(),
+            features: features.into(),
             max_height,
-            details,
-            elevations,
-            groups,
+            details: details.into(),
+            elevations: elevations.into(),
+            groups: groups.into(),
+            kind_counts,
             index,
         }
     }
@@ -666,23 +742,36 @@ impl Map {
         }
         let start = f.elev as usize;
         let n = self.rings(f).map(<[_]>::len).sum::<usize>();
-        self.elevations.get(start..start + n)
+        self.elevations.get(start..start.checked_add(n)?)
     }
 
     /// Roof and facade detail of a solid, if mapped.
     pub fn detail(&self, f: &Feature) -> Detail {
         self.details
             .get(f.detail as usize)
-            .copied()
+            .map(DetailRec::get)
             .unwrap_or_default()
     }
 
+    /// Ring `r`; empty if `r` is out of range. Snapshots check ring starts
+    /// when opened but not every feature's ring range (that would read all
+    /// of the features), so a damaged feature draws nothing.
     pub fn ring(&self, r: u32) -> &[[f32; 2]] {
-        let (a, b) = (
-            self.ring_starts[r as usize],
-            self.ring_starts[r as usize + 1],
-        );
-        &self.points[a as usize..b as usize]
+        let r = r as usize;
+        match (self.ring_starts.get(r), self.ring_starts.get(r + 1)) {
+            (Some(&a), Some(&b)) => self.points.get(a as usize..b as usize).unwrap_or(&[]),
+            _ => &[],
+        }
+    }
+
+    /// A point standing for the feature: the first vertex of its first
+    /// ring, or its bounding box's corner (the same point, for a point
+    /// object) if it has none.
+    pub fn first_point(&self, f: &Feature) -> [f32; 2] {
+        self.ring(f.ring_start)
+            .first()
+            .copied()
+            .unwrap_or([f.bbox[0], f.bbox[1]])
     }
 
     /// The ring with the largest area: the outline of a solid. Rings come
@@ -698,45 +787,103 @@ impl Map {
     }
 
     pub fn rings(&self, f: &Feature) -> impl Iterator<Item = &[[f32; 2]]> {
-        (f.ring_start..f.ring_start + f.ring_count).map(|r| self.ring(r))
+        (f.ring_start..f.ring_start.saturating_add(f.ring_count)).map(|r| self.ring(r))
     }
 
     /// Indices of features visible at `zoom` whose bounds intersect `area`
     /// (local coordinates), in draw order.
     pub fn query(&self, area: [f32; 4], zoom: f32, out: &mut Vec<u32>) {
         out.clear();
-        let env = AABB::from_corners([area[0], area[1]], [area[2], area[3]]);
+        let q = [
+            area[0].min(area[2]),
+            area[1].min(area[3]),
+            area[0].max(area[2]),
+            area[1].max(area[3]),
+        ];
         let last = (zoom.max(0.0) as usize).min(MAX_BUCKET);
-        for tree in &self.index[..=last] {
-            out.extend(
-                tree.locate_in_envelope_intersecting(env)
-                    .map(|e| e.data)
-                    .filter(|&i| self.features[i as usize].vis_zoom <= zoom),
-            );
+        let mut stack = Vec::new();
+        for (b, tree) in self.index[..=last].iter().enumerate() {
+            // Bucket b holds vis_zoom in [b, b + 1) (and the top one all
+            // beyond), so only the last bucket needs each feature checked.
+            if b < last {
+                tree.search(&q, &mut stack, |i| out.push(i));
+            } else {
+                tree.search(&q, &mut stack, |i| {
+                    if self.features[i as usize].vis_zoom <= zoom {
+                        out.push(i);
+                    }
+                });
+            }
         }
         out.sort_unstable();
     }
 
     /// Per-kind feature counts, most common first.
     pub fn stats(&self) -> Vec<(Kind, usize)> {
-        let mut counts = std::collections::BTreeMap::new();
-        for f in &self.features {
-            *counts.entry(f.kind).or_insert(0usize) += 1;
-        }
-        let mut v: Vec<_> = counts.into_iter().collect();
+        let mut v: Vec<(Kind, usize)> = (0..Kind::COUNT as u8)
+            .filter_map(Kind::from_u8)
+            .map(|k| {
+                (
+                    k,
+                    self.kind_counts.get(k as usize).copied().unwrap_or(0) as usize,
+                )
+            })
+            .filter(|&(_, n)| n > 0)
+            .collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.1));
         v
     }
+
+    /// Bytes of map data on the heap and in a mapped snapshot.
+    pub fn storage(&self) -> (usize, usize) {
+        fn add<T>(s: &Store<T>, t: &mut (usize, usize)) {
+            let n = std::mem::size_of_val(&s[..]);
+            if s.is_mapped() {
+                t.1 += n
+            } else {
+                t.0 += n
+            }
+        }
+        let mut t = (0, 0);
+        add(&self.points, &mut t);
+        add(&self.ring_starts, &mut t);
+        add(&self.features, &mut t);
+        add(&self.details, &mut t);
+        add(&self.elevations, &mut t);
+        add(&self.groups, &mut t);
+        for tree in &self.index {
+            add(&tree.boxes, &mut t);
+            add(&tree.ids, &mut t);
+        }
+        t
+    }
 }
 
-/// One R-tree per zoom bucket: a feature lives in the bucket of the zoom it
-/// appears at, so a query walks only the buckets up to its zoom.
-fn build_index(features: &[Feature]) -> Vec<RTree<Entry>> {
-    let mut buckets: Vec<Vec<Entry>> = (0..=MAX_BUCKET).map(|_| Vec::new()).collect();
-    for (i, f) in features.iter().enumerate() {
-        let b = (f.vis_zoom.max(0.0) as usize).min(MAX_BUCKET);
-        let r = Rectangle::from_corners([f.bbox[0], f.bbox[1]], [f.bbox[2], f.bbox[3]]);
-        buckets[b].push(GeomWithData::new(r, i as u32));
+/// Features per kind, indexed by discriminant.
+pub(crate) fn count_kinds(features: impl Iterator<Item = Feature>) -> Vec<u64> {
+    let mut c = vec![0u64; Kind::COUNT];
+    for f in features {
+        c[f.kind() as usize] += 1;
     }
-    buckets.into_par_iter().map(RTree::bulk_load).collect()
+    c
+}
+
+/// The zoom bucket a feature is indexed in.
+pub(crate) fn bucket(vis_zoom: f32) -> usize {
+    (vis_zoom.max(0.0) as usize).min(MAX_BUCKET)
+}
+
+/// One tree per zoom bucket: a feature lives in the bucket of the zoom it
+/// appears at, so a query walks only the buckets up to its zoom. Features
+/// with a NaN zoom are never visible and are left out.
+pub(crate) fn build_index(features: impl Iterator<Item = Feature>) -> Vec<Packed> {
+    let mut buckets: Vec<Vec<([f32; 4], u32)>> = (0..=MAX_BUCKET).map(|_| Vec::new()).collect();
+    for (i, f) in features.enumerate() {
+        if !f.vis_zoom.is_nan() {
+            let [x0, y0, x1, y1] = f.bbox;
+            let b = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
+            buckets[bucket(f.vis_zoom)].push((b, i as u32));
+        }
+    }
+    buckets.into_par_iter().map(Packed::build).collect()
 }

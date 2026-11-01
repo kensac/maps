@@ -375,6 +375,15 @@ pub enum RoofShape {
     Dome,
 }
 
+impl RoofShape {
+    pub fn from_u8(v: u8) -> Option<RoofShape> {
+        use RoofShape::*;
+        [Flat, Gabled, Hipped, Pyramidal, Skillion, Dome]
+            .get(v as usize)
+            .copied()
+    }
+}
+
 /// Architectural detail of an extruded solid.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Detail {
@@ -627,6 +636,15 @@ impl Group {
 }
 
 impl Kind {
+    /// Number of kinds; discriminants run `0..COUNT`.
+    pub const COUNT: usize = Kind::NavLight as usize + 1;
+
+    /// The kind with discriminant `v`, if there is one.
+    pub fn from_u8(v: u8) -> Option<Kind> {
+        // SAFETY: Kind is repr(u8) with contiguous discriminants 0..COUNT.
+        ((v as usize) < Kind::COUNT).then(|| unsafe { std::mem::transmute::<u8, Kind>(v) })
+    }
+
     /// Polygon geometry: ground areas and extruded solids.
     pub fn is_area(self) -> bool {
         self <= Kind::Tomb

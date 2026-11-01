@@ -70,12 +70,20 @@ enum Command {
         cache_mb: u64,
     },
     /// Build the map once and save it as a snapshot that every command
-    /// loads in seconds, with less memory than building from the extract.
+    /// maps from disk in seconds, instead of building from the extract.
     Build {
         /// Input .osm.pbf file.
         input: PathBuf,
         /// Output snapshot path.
         #[arg(short, long, default_value = "map.snap")]
+        output: PathBuf,
+    },
+    /// Convert a MAPSNAP1 snapshot to the memory-mapped MAPSNAP2 format,
+    /// without rebuilding from the extract.
+    Convert {
+        /// Input v1 snapshot.
+        input: PathBuf,
+        /// Output v2 snapshot (written as <output>.partial, then renamed).
         output: PathBuf,
     },
     /// Exit 0 if a local server answers /healthz (for container healthchecks).
@@ -152,8 +160,11 @@ fn load(path: &Path) -> Result<Map> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     // Headroom for deep work-stealing recursion over large tile sets.
+    // Renders catch their own panics; this keeps any other panic in a
+    // spawned job from aborting the process.
     rayon::ThreadPoolBuilder::new()
         .stack_size(8 << 20)
+        .panic_handler(|_| eprintln!("a pool job panicked"))
         .build_global()?;
     match cli.command {
         Command::Render {
@@ -212,6 +223,7 @@ fn main() -> Result<()> {
             )
         }
         Command::Check { addr } => check(addr),
+        Command::Convert { input, output } => maps::snapshot::convert(&input, &output),
         Command::Build { input, output } => maps::snapshot::save(&load(&input)?, &output),
         Command::Info { input } => {
             let map = load(&input)?;

@@ -206,18 +206,18 @@ impl Renderer<'_> {
         let mut ground: Vec<(LineStyle, LineGeom)> = Vec::new();
         for ids in self.batches(run) {
             let f0 = &self.map.features[ids[0] as usize];
-            let style = self.theme.line(f0.kind, f0.flags, f0.height, &fr.ctx);
+            let style = self.theme.line(f0.kind(), f0.flags, f0.height, &fr.ctx);
             let widest = [&style.casing, &style.line]
                 .iter()
                 .filter_map(|s| s.as_ref().map(|s| s.width))
                 .fold(0.0_f32, f32::max);
-            let tree_row = scene.is_some() && f0.kind == Kind::TreeRow;
+            let tree_row = scene.is_some() && f0.kind() == Kind::TreeRow;
             if widest <= 0.0 && !tree_row {
                 continue;
             }
             let fixed = scene
                 .as_ref()
-                .and_then(|_| self.raised_form(f0.kind, f0.height))
+                .and_then(|_| self.raised_form(f0.kind(), f0.height))
                 .map(|(form, m)| (form, m * fr.lift_per_m))
                 .filter(|&(_, px)| px >= 1.0);
             let base_px = (f0.base as f64 * fr.lift_per_m).max(0.0);
@@ -355,7 +355,7 @@ impl Renderer<'_> {
             })
             .collect();
         let pieces = clip_raised(&pts, &clip);
-        let form = if deck_height(f.kind, f.layer, f.flags) > 0.0 {
+        let form = if deck_height(f.kind(), f.layer, f.flags) > 0.0 {
             Form::Deck {
                 pillar_spacing: PILLAR_SPACING,
             }

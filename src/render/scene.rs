@@ -78,8 +78,8 @@ impl Scene {
     pub(super) fn add_features(&mut self, fr: &Frame, map: &Map, run: &[u32]) {
         for &id in run {
             let f = &map.features[id as usize];
-            let (depth, tie) = if f.kind.is_point() {
-                let p = map.ring(f.ring_start)[0];
+            let (depth, tie) = if f.kind().is_point() {
+                let p = map.first_point(f);
                 (fr.apply(p[0] as f64, p[1] as f64)[1], (id as u64) << 24)
             } else if let Some(&group) = map.groups.get(f.group as usize) {
                 // Parts of one building sort as a unit, lowest top first, so
@@ -160,7 +160,7 @@ impl Renderer<'_> {
             match item {
                 Item::Feature(id) => {
                     let f = &self.map.features[id as usize];
-                    if f.kind.is_point() {
+                    if f.kind().is_point() {
                         self.draw_prop(pixmap, fr, f);
                     } else {
                         self.draw_solid(pixmap, fr, f, s);

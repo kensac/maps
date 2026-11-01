@@ -133,6 +133,19 @@ fn parse_file(s: &str) -> Option<(i64, u8)> {
         .and(y.parse().ok().map(|y| (y, scale)))
 }
 
+/// Runs `work`, turning a panic into an error, so a bad tile fails its own
+/// request instead of taking the process down.
+pub(crate) fn contained<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|p| {
+        let msg = p
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        anyhow::bail!("render panicked: {msg}")
+    })
+}
+
 thread_local! {
     /// One reusable render target per worker thread and tile size.
     static PIXMAP: RefCell<Option<Pixmap>> = const { RefCell::new(None) };
@@ -177,7 +190,7 @@ impl App {
                 return;
             }
             let t = Instant::now();
-            let result = work(&app).map(Bytes::from);
+            let result = contained(|| work(&app)).map(Bytes::from);
             app.metrics
                 .render_nanos
                 .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -363,6 +376,7 @@ async fn meta(State(app): State<Shared>) -> impl IntoResponse {
 
 async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
     app.cache.run_pending_tasks().await;
+    app.geo_cache.run_pending_tasks().await;
     let m = &app.metrics;
     let rendered = m.rendered.load(Ordering::Relaxed);
     let nanos = m.render_nanos.load(Ordering::Relaxed);
@@ -376,7 +390,9 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
          # TYPE maps_geo_tiles_total counter\nmaps_geo_tiles_total {}\n\
          # TYPE maps_geo_bytes_total counter\nmaps_geo_bytes_total {}\n\
          # TYPE maps_cache_entries gauge\nmaps_cache_entries {}\n\
-         # TYPE maps_cache_bytes gauge\nmaps_cache_bytes {}\n",
+         # TYPE maps_cache_bytes gauge\nmaps_cache_bytes {}\n\
+         # TYPE maps_geo_cache_entries gauge\nmaps_geo_cache_entries {}\n\
+         # TYPE maps_geo_cache_bytes gauge\nmaps_geo_cache_bytes {}\n",
         m.requests.load(Ordering::Relaxed),
         m.hits.load(Ordering::Relaxed),
         rendered,
@@ -387,6 +403,8 @@ async fn metrics(State(app): State<Shared>) -> impl IntoResponse {
         m.geo_bytes.load(Ordering::Relaxed),
         app.cache.entry_count(),
         app.cache.weighted_size(),
+        app.geo_cache.entry_count(),
+        app.geo_cache.weighted_size(),
     );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }
@@ -495,6 +513,13 @@ mod tests {
             Some((ThemeName::Light, Buildings::Extruded))
         );
         assert_eq!(parse_style("neon"), None);
+    }
+
+    #[test]
+    fn panics_become_errors() {
+        let e = contained::<()>(|| panic!("boom")).unwrap_err();
+        assert!(e.to_string().contains("boom"));
+        assert_eq!(contained(|| Ok(7)).unwrap(), 7);
     }
 
     #[test]

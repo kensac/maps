@@ -18,8 +18,8 @@ pyramid offline.
 ## Features
 
 **WebGL client, like Google Maps**
-- `maps serve` keeps the map in memory and builds geometry tiles on
-  request: styled, triangulated ground, road ribbons, buildings and model
+- `maps serve` maps the map from a snapshot (or builds it from an
+  extract) and builds geometry tiles on request: styled, triangulated ground, road ribbons, buildings and model
   instances (`src/vtile.rs`).
 - The browser draws every frame itself with WebGL2 and a perspective
   camera, so pan, zoom, rotate and tilt are smooth at 60 fps.
@@ -97,9 +97,12 @@ cargo build --release
 # Feature counts and bounds
 ./target/release/maps info nyc.osm.pbf
 
-# Build once into a snapshot; every command loads it in seconds
+# Build once into a snapshot; every command maps it from disk at once
 ./target/release/maps build us-northeast.osm.pbf -o northeast.snap
 ./target/release/maps serve northeast.snap
+
+# Convert an older MAPSNAP1 snapshot without rebuilding
+./target/release/maps convert old.snap northeast.snap
 ```
 
 In the viewer, drag to pan and scroll to zoom. Right-drag or Ctrl+drag
@@ -158,28 +161,58 @@ Endpoints:
 | `/models/{version}/{theme}.bin` | Model templates for instances |
 | `/tiles/{version}/{style}/{bearing}/{pitch}/{z}/{x}/{y}[@2x].png` | Tiles. Immutable and cacheable forever, because `version` changes with the data. |
 | `/healthz` | Liveness probe (`ok`); `maps check` probes it from inside the image |
-| `/metrics` | Prometheus counters: requests, cache hits, renders, render time, geometry tiles and bytes sent, cache size |
+| `/metrics` | Prometheus counters: requests, cache hits, renders, render time, geometry tiles and bytes sent, and the size of the raster and geometry tile caches |
 
 The server shuts down gracefully on SIGTERM. Pushes to `main` publish
 `ghcr.io/kensac/maps` (`latest` and `sha-<short>`).
 
 ### Large extracts
 
-Building the map from an extract briefly needs about twice the memory it
-serves with. `maps build` does that once and writes a snapshot, which every
-command accepts in place of the `.osm.pbf`:
+Building the map from an extract needs about twice the memory the map
+itself takes. `maps build` does that once and writes a snapshot, which every
+command accepts in place of the `.osm.pbf`. A snapshot is memory-mapped and
+used in place, spatial index included, so a server is up at once and holds
+only the pages tiles touch, which the kernel can drop again:
 
 | US Northeast (1.8 GB PBF, 25 M features) | From PBF | From snapshot |
 | --- | ---: | ---: |
-| Load time (M1 Pro) | 42 s | 3.5 s |
-| Peak memory | 12 GB | 5.7 GB |
+| Ready to serve | 72 s | 0.04 s |
+| Peak memory | 10 GB | 3 MB, plus 200 MB of file pages read by the checks |
+| Anonymous memory after 180 tiles in five cities (Linux) | | 135 MB, plus 1.5 GB of file pages |
 
-Ingest keeps the build lean: node coordinates are written once into a
-packed 32-bit fixed-point array (about 1 cm), node references become
-32-bit indices so the IDs can be freed, raw ways are released as they are
-built, and the feature sort is in place.
+The snapshot is 4.3 GB, of which the index is 0.5 GB (21 bytes a feature).
+A tile that touches pages not yet read waits for the disk: in that test
+first renders took about twice as long as repeats.
 
-The snapshot is 3.8 GB. Serving it uses about 5.7 GB plus the tile cache.
+**Format.** `MAPSNAP2` (`src/snapshot.rs`): a fixed header (bounds, origin,
+background, tallest structure, and the offset and length of each section),
+then 64-byte-aligned sections: points, ring starts, features (56-byte
+records), roof and facade details (24-byte records), elevations, building
+groups, per-kind feature counts (so `/v1/kinds` needs no scan) and one packed
+Hilbert R-tree per zoom bucket (`src/index.rs`; 16 children a node, `f32`
+boxes, `u32` ids). Opening checks the header, every section's bounds and
+alignment, that ring starts are in order and end at the last point, and
+that the index has exactly the shape the builder writes, with every id in
+range. That reads the ring starts and index ids, about 200 MB for US
+Northeast (40 ms from the page cache). The 1.4 GB of feature records are not
+scanned: their kind and roof bytes go through checked accessors, and their
+ring, detail, elevation and group indices are bounds-checked where they are
+used, so a damaged feature draws nothing. A render that panics anyway fails
+its own request, not the server.
+
+**Older snapshots.** `MAPSNAP1` files still load, copied onto the heap with
+the index rebuilt (5.3 GB peak, 4.7 GB after loading, for US Northeast).
+`maps convert old.snap new.snap` converts one in seconds without the
+extract, copying the arrays and building only the index (1.3 GB peak for US
+Northeast).
+
+**Replacing a snapshot.** A running server reads the file in place, so
+changing it under the server crashes it (SIGBUS) or serves garbage. Never
+`cp` over a snapshot or write into it. Write the new file next to it as
+`<name>.partial`, then `mv` it over the old one on the same filesystem (a
+rename leaves the old file intact for anyone still mapping it), then
+restart. `maps build` and `maps convert` already write `<output>.partial`
+and rename it, syncing both the file and its directory.
 
 ## Performance
 
@@ -189,7 +222,7 @@ Measured on an Apple M1 Pro (10 cores), release build.
 | --- | ---: | ---: | ---: |
 | JFK airport | 2.3 MB | 59 k | 0.12 s |
 | Manhattan + Brooklyn | 16 MB | 361 k | 0.34 s |
-| New York metro | 184 MB | 3.9 M | 4.5 s, then 1.7 GB resident |
+| New York metro | 184 MB | 3.9 M | 4.5 s, then 1.7 GB resident; from a snapshot (590 MB) at once, with a 70 MB footprint after 300 tile requests |
 
 Serving the NYC extract (Midtown, 512 px retina tiles at bearing 29° and
 pitch 45°, 16 concurrent clients):
@@ -226,8 +259,8 @@ It classifies tags into physical kinds with real or typical dimensions
 - Turns coastlines into land.
 - Drops building outlines that are drawn through their parts, and lifts
   rooftop objects onto their buildings.
-- Sorts features into draw order and indexes them in one R-tree per zoom
-  bucket.
+- Sorts features into draw order and indexes them in one packed Hilbert
+  R-tree per zoom bucket (`src/index.rs`), stored in the snapshot.
 
 **Rendering** (`src/render/`) uses an orthographic camera with bearing and
 pitch. The ground is foreshortened by cos(pitch) and heights rise by

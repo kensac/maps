@@ -365,7 +365,7 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
         let group = feat.group();
         match group {
             Group::Land | Group::Areas | Group::AreaOverlays => {
-                if let Some(style) = theme.area(feat.kind, &ctx) {
+                if let Some(style) = theme.area(feat.kind(), &ctx) {
                     fill(
                         &mut b,
                         map,
@@ -379,7 +379,7 @@ pub fn build(map: &Map, theme: &Theme, z: u8, x: u32, y: u32) -> Vec<u8> {
             }
             // Level of detail: solids from z15, objects at full detail only.
             Group::Objects => {
-                if feat.kind.is_point() {
+                if feat.kind().is_point() {
                     if z >= MAX_ZOOM {
                         instance(&mut b, map, &tf, feat);
                     }
@@ -663,11 +663,11 @@ fn line_feature(
     rect: &Rect,
     tol: f64,
 ) {
-    let style = theme.line(feat.kind, feat.flags, feat.height, ctx);
+    let style = theme.line(feat.kind(), feat.flags, feat.height, ctx);
     let elev = map.elevations(feat);
     let group = feat.group();
     // Heights: elevation profiles, else a fixed height for raised kinds.
-    let fixed = match feat.kind {
+    let fixed = match feat.kind() {
         Kind::Hedge | Kind::Fence | Kind::Wall | Kind::LowBarrier | Kind::Dam | Kind::Weir => {
             Some(feat.height as f64)
         }
@@ -713,10 +713,10 @@ fn line_feature(
                 continue;
             }
             let raised_kind = matches!(
-                feat.kind,
+                feat.kind(),
                 Kind::Hedge | Kind::Fence | Kind::Wall | Kind::LowBarrier | Kind::Dam | Kind::Weir
             );
-            if feat.kind == Kind::TreeRow {
+            if feat.kind() == Kind::TreeRow {
                 tree_row(b, tf, feat, &piece, dist);
                 continue;
             }
@@ -726,14 +726,26 @@ fn line_feature(
                 _ => piece.clone(),
             };
             if raised_kind && tf.solids {
-                curtain(b, tf, &top, feat.base as f64, theme.barrier_face(feat.kind));
+                curtain(
+                    b,
+                    tf,
+                    &top,
+                    feat.base as f64,
+                    theme.barrier_face(feat.kind()),
+                );
             }
-            if tf.solids && matches!(feat.kind, Kind::PowerLine | Kind::Aerialway | Kind::Gantry) {
-                poles(b, tf, &top, theme.wire(feat.kind));
+            if tf.solids
+                && matches!(
+                    feat.kind(),
+                    Kind::PowerLine | Kind::Aerialway | Kind::Gantry
+                )
+            {
+                poles(b, tf, &top, theme.wire(feat.kind()));
             }
-            let bridge = deck_height(feat.kind, feat.layer, feat.flags) > 0.0
-                || matches!(feat.kind, Kind::JetBridge | Kind::Pipeline);
-            if tf.solids && (top.iter().any(|p| p[2] > 0.3) && feat.kind.is_transport() || bridge) {
+            let bridge = deck_height(feat.kind(), feat.layer, feat.flags) > 0.0
+                || matches!(feat.kind(), Kind::JetBridge | Kind::Pipeline);
+            if tf.solids && (top.iter().any(|p| p[2] > 0.3) && feat.kind().is_transport() || bridge)
+            {
                 support(b, theme, tf, &top, &style, ctx.ppm, bridge, dist);
             }
             // Casings are invisible at a pixel or two wide.
@@ -923,14 +935,14 @@ fn tree_row(b: &mut Buffers, tf: &TileFrame, feat: &Feature, pts: &[[f64; 3]], d
 
 /// A point object as an instance, if its anchor lies in this tile.
 fn instance(b: &mut Buffers, map: &Map, tf: &TileFrame, feat: &Feature) {
-    let p = tf.uv(map.ring(feat.ring_start)[0]);
+    let p = tf.uv(map.first_point(feat));
     if !(0.0..1.0).contains(&p[0]) || !(0.0..1.0).contains(&p[1]) {
         return;
     }
     let conifer = feat.flags & flags::CONIFER != 0;
-    let tpl = template_id(feat.kind, feat.variant, conifer);
+    let tpl = template_id(feat.kind(), feat.variant, conifer);
     let h = (feat.height - feat.base).max(0.1) as f64;
-    let scale = h / template_height(feat.kind, feat.variant);
+    let scale = h / template_height(feat.kind(), feat.variant);
     let heading = if feat.heading.is_finite() {
         feat.heading as f64
     } else {
@@ -1020,7 +1032,7 @@ fn solid(
     }
     let detail = map.detail(feat);
     let (mut base, top) = (feat.base, feat.height);
-    if feat.kind == Kind::Canopy {
+    if feat.kind() == Kind::Canopy {
         base = base.max(top - 0.4);
     }
     let to_m = |p: [f32; 2]| {
@@ -1038,7 +1050,7 @@ fn solid(
     let eave = roof.as_ref().map_or(top, |r| r.eave);
     let facade = match detail.facade_colour {
         Some(c) => theme.mapped_facade(c, 1.0),
-        None => theme.facade(feat.kind, 1.0),
+        None => theme.facade(feat.kind(), 1.0),
     };
     let roof_color = detail
         .roof_colour
@@ -1047,7 +1059,7 @@ fn solid(
             if roof.is_some() {
                 theme.pitched_roof()
             } else {
-                theme.roof(feat.kind)
+                theme.roof(feat.kind())
             }
         });
     let floors = if detail.levels >= 1.0 {
@@ -1055,7 +1067,7 @@ fn solid(
     } else {
         ((eave - base) as f64 / 3.2).round().max(1.0)
     };
-    let window = if feat.kind == Kind::Building && eave - base >= 2.5 {
+    let window = if feat.kind() == Kind::Building && eave - base >= 2.5 {
         [
             (eave - base) as f64 / floors,
             base as f64,

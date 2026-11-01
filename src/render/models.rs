@@ -531,7 +531,7 @@ impl Renderer<'_> {
 
     /// A point object, drawn from its bespoke model.
     pub(super) fn draw_prop(&self, pixmap: &mut Pixmap, fr: &Frame, f: &Feature) {
-        let p = self.map.ring(f.ring_start)[0];
+        let p = self.map.first_point(f);
         let ground = fr.apply(p[0] as f64, p[1] as f64);
         let h = (f.height - f.base).max(0.1) as f64;
         // Skip objects that cannot reach the view.
@@ -541,10 +541,10 @@ impl Renderer<'_> {
             return;
         }
         let at = [ground[0], ground[1] - f.base as f64 * fr.lift_per_m];
-        let c = self.theme.object(f.kind);
-        let mut m = model(f.kind, f.variant, h, &c, self.theme.trunk());
+        let c = self.theme.object(f.kind());
+        let mut m = model(f.kind(), f.variant, h, &c, self.theme.trunk());
         m.turn_to(f.heading as f64);
-        if f.kind == Kind::Tree && f.flags & flags::CONIFER != 0 {
+        if f.kind() == Kind::Tree && f.flags & flags::CONIFER != 0 {
             m = Mesh::new();
             tree(&mut m, h, true, &c, self.theme.trunk());
         }
@@ -557,13 +557,13 @@ impl Renderer<'_> {
         let view = fr.rect(8.0);
         for &id in ids {
             let f = &self.map.features[id as usize];
-            let p = self.map.ring(f.ring_start)[0];
+            let p = self.map.first_point(f);
             let [x, y] = fr.apply(p[0] as f64, p[1] as f64);
             if !view.contains([x, y]) {
                 continue;
             }
-            let c = self.theme.object(f.kind);
-            let radius = match f.kind {
+            let c = self.theme.object(f.kind());
+            let radius = match f.kind() {
                 Kind::Tree => {
                     let r = ((0.3 * f.height as f64).max(1.2) * ppm).max(1.0);
                     oval(pixmap, x, y, r, c.body);
