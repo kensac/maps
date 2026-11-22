@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>kensac/homelab-config//renovate-default.json"],
+  "packageRules": [
+    {
+      "description": "Majors automerge here too (Kanishk, 2026-11-21): Renovate merges only once every check passes, and CI runs cargo fmt --check, clippy -D warnings and cargo test. Same 2-day cooldown as minors.",
+      "matchUpdateTypes": ["major"],
+      "automerge": true,
+      "minimumReleaseAge": "2 days",
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    }
+  ]
+}
