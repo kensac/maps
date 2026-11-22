@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 
 # Build. Needs Rust 1.88+ (slice::as_chunks).
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS builder
 WORKDIR /app
 ENV CARGO_TERM_COLOR=never
 
@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
  && strip --strip-debug /usr/local/bin/maps
 
 # Runtime: glibc only, non-root. Probe GET /health externally.
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=builder /usr/local/bin/maps /usr/local/bin/maps
 
 USER nonroot:nonroot
